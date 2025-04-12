@@ -26,284 +26,470 @@ namespace Nesting {
     };
 
     public ref class HorizontalRulerControl : public System::Windows::Forms::Control {
-    private:
-        float scale;
+private:
+    float scale;
+    int centerOffset; // Offset to center point
 
-    public:
-        HorizontalRulerControl(int width) {
-            this->Width = width + 100;
-            this->Height = 13;
-            this->BackColor = Color::White;
-            this->DoubleBuffered = true;
-            this->Visible = true;
-            scale = 1.0f; // Initialize scale
-        }
+public:
+    HorizontalRulerControl(int width) {
+        this->Width = width;
+        this->Height = 20;
+        this->BackColor = Color::White;
+        this->DoubleBuffered = true;
+        this->Visible = true;
+        scale = 1.0f; // Initialize scale
+        centerOffset = width / 2; // Set center point
+    }
 
-        void SetCanvasScale(float newScale) {
-            scale = newScale;
-            this->Invalidate(); // Redraw the ruler
-        }
+    void SetCanvasScale(float newScale) {
+        scale = newScale;
+        this->Invalidate(); // Redraw the ruler
+    }
 
-    protected:
-        virtual void OnPaint(PaintEventArgs^ e) override {
-            Control::OnPaint(e);
+protected:
+    virtual void OnPaint(PaintEventArgs^ e) override {
+        Control::OnPaint(e);
 
-            Pen^ pen = gcnew Pen(Color::Black);
-            float pixelsPerMM = e->Graphics->DpiX / 25.4f;
-            float scaledPixelsPerMM = pixelsPerMM * scale;
-            float factor = this->Width / 100.0f;
-            int numTicks = (int)(this->Width / (scaledPixelsPerMM * factor));
-            //int numTicks = 20; // Number of ticks per pixel
-
-            int canvasStartY = 10;
-           
-
-            for (int i = canvasStartY; i <= this->Width + canvasStartY; i += (scaledPixelsPerMM * numTicks) / 3) {
-                int xPos = i;
-                e->Graphics->DrawLine(pen, xPos, 0, xPos, 20);
-                String^ text = Math::Round((i - canvasStartY) / scaledPixelsPerMM).ToString();
-                SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
-                e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(xPos, 0));
-            }
-        }
-    };
-
-    public ref class VerticalRulerControl : public System::Windows::Forms::Control {
-    private:
-        float scale;
-
-    public:
-        VerticalRulerControl(int height) {
-            this->Width = 13;
-            this->Height = height+ 20;
-            this->BackColor = Color::White;
-            this->DoubleBuffered = true;
-            this->Visible = true;
-            scale = 1.0f; // Initialize scale
-        }
-
-        void SetCanvasScale(float newScale) {
-            scale = newScale;
-            this->Invalidate(); // Redraw the ruler
-        }
-
-    protected:
-        virtual void OnPaint(PaintEventArgs^ e) override {
-            Control::OnPaint(e);
-
-            Pen^ pen = gcnew Pen(Color::Black);
-            float pixelsPerMM = e->Graphics->DpiX / 25.4f;
-            float scaledPixelsPerMM = pixelsPerMM * scale;
-            float factor = this->Height / 100.0f;
-            int numTicks = (int)(this->Height / (scaledPixelsPerMM * factor));
-
-            int canvasStartY = 10;
-            e->Graphics->DrawLine(pen, 0, canvasStartY, 20, canvasStartY);
-
-            String^ zeroText = "0";
-            SizeF zeroTextSize = e->Graphics->MeasureString(zeroText, gcnew System::Drawing::Font("Arial", 7));
-            e->Graphics->DrawString(zeroText, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(0, 0));
-
-            for (int i = 0; i <= this->Height + canvasStartY; i += (scaledPixelsPerMM * numTicks)/3) {
-                int dpiX = 0;
-                int yPos = i;
-                e->Graphics->DrawLine(pen, 0, i, 20, i);
-                String^ text = Math::Round((i - canvasStartY) / scaledPixelsPerMM).ToString();
-                SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
-                e->Graphics->TranslateTransform(dpiX, yPos);
-                e->Graphics->RotateTransform(-90);
-                e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(0, 0));
-                e->Graphics->ResetTransform();
-            }
-        }
-    };
-
-    public ref class CanvasControl : public Panel {
-
-    public:
-        int canvasWidthInMillimeters;
-        int canvasHeightInMillimeters;
-        String^ canvasSaveLocation;
-        List<Image^>^ images;
-        String^ Filepath;
-        float scaledHeightMM;
-        float scaledWidthMM;
-        String^ SelectedHeightMM;
-        String^ SelectedWidthMM;
-        bool isCropping = false;
-        Point cropStartPoint;
-        List<int>^ selectedImageIndices;
-        Point lastMousePosition;
-        Point lastImagePosition;
-        Point dragStartPoint;
-        bool isDragging;
-        System::Drawing::Rectangle cropRectangle;
-        List<Tuple<Image^, Point>^>^ imagePositions;
-        List<ImageAction^>^ undoActionHistory;
-        List<ImageAction^>^ redoActionHistory;
-        List<Tuple<Image^, Point>^>^ copiedImages;
-        List<Tuple<float, float>^>^ freeSpace;
-        String^ OriginalImagePath;
+        Pen^ pen = gcnew Pen(Color::Black);
+        float pixelsPerMM = e->Graphics->DpiX / 25.4f;
+        float scaledPixelsPerMM = pixelsPerMM * scale;
         
-    public:
-        delegate void DataCallback(String^ newText1, String^ newText2);
-        delegate void PointCallback(float XLoacation, float Ylocation);
-    private:
-        DataCallback^ callbackFunction;
-        PointCallback^ pointCallBack;
+        // Draw center line
+        int centerX = centerOffset;
+        e->Graphics->DrawLine(pen, centerX, 0, centerX, this->Height);
+        
+        // Draw zero marker
+        String^ zeroText = "0";
+        SizeF zeroTextSize = e->Graphics->MeasureString(zeroText, gcnew System::Drawing::Font("Arial", 7));
+        e->Graphics->DrawString(zeroText, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, 
+            PointF(centerX - zeroTextSize.Width / 2, 0));
 
-    public:
-        CanvasControl() {
-            DoubleBuffered = true;
-            SetStyle(ControlStyles::UserPaint | ControlStyles::AllPaintingInWmPaint | ControlStyles::Opaque, true);
-            BackColor = Color::White;
-            scale = 1.0f;
-            SetStyle(ControlStyles::UserPaint | ControlStyles::AllPaintingInWmPaint | ControlStyles::Opaque, true);
-            imagePositions = gcnew List<Tuple<Image^, Point>^>();
-            copiedImages = gcnew List<Tuple<Image^, Point>^>();
-            images = gcnew List<Image^>();
-            selectedImageIndices = gcnew List<int>();
-            undoActionHistory = gcnew List<ImageAction^>();
-            redoActionHistory = gcnew List<ImageAction^>();
-            freeSpace = gcnew List<Tuple<float, float>^>();
-            this->MouseDown += gcnew MouseEventHandler(this, &CanvasControl::OnMouseDown);
-            this->MouseMove += gcnew MouseEventHandler(this, &CanvasControl::OnMouseMove);
-            this->MouseUp += gcnew MouseEventHandler(this, &CanvasControl::OnMouseUp);
+        // Draw ticks and labels at fixed intervals
+        int interval = 200; // Tick every 200 units
+        float scaledInterval = interval * scaledPixelsPerMM / 25.4f;
+        
+        // Draw positive ticks (right of center)
+        for (int i = interval; i <= (this->Width - centerOffset) / (scaledPixelsPerMM / 25.4f); i += interval) {
+            float xPos = centerX + i * scaledPixelsPerMM / 25.4f;
+            e->Graphics->DrawLine(pen, xPos, 0, xPos, 10);
+            String^ text = i.ToString();
+            SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
+            e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, 
+                PointF(xPos - textSize.Width / 2, 10));
         }
-       
-        void SetContextMenuStrip(System::Windows::Forms::ContextMenuStrip^ menuStrip) {
-            this->ContextMenuStrip = menuStrip;
+        
+        // Draw negative ticks (left of center)
+        for (int i = -interval; i >= -centerOffset / (scaledPixelsPerMM / 25.4f); i -= interval) {
+            float xPos = centerX + i * scaledPixelsPerMM / 25.4f;
+            e->Graphics->DrawLine(pen, xPos, 0, xPos, 10);
+            String^ text = i.ToString();
+            SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
+            e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, 
+                PointF(xPos - textSize.Width / 2, 10));
         }
+    }
+};
 
-        void SetScale(float newScale) {
-            float oldScale = scale;
-            scale = newScale;
+public ref class VerticalRulerControl : public System::Windows::Forms::Control {
+private:
+    float scale;
+    int centerOffset; // Offset to center point
+
+public:
+    VerticalRulerControl(int height) {
+        this->Width = 20;
+        this->Height = height;
+        this->BackColor = Color::White;
+        this->DoubleBuffered = true;
+        this->Visible = true;
+        scale = 1.0f; // Initialize scale
+        centerOffset = height / 2; // Set center point
+    }
+
+    void SetCanvasScale(float newScale) {
+        scale = newScale;
+        this->Invalidate(); // Redraw the ruler
+    }
+
+protected:
+    virtual void OnPaint(PaintEventArgs^ e) override {
+        Control::OnPaint(e);
+
+        Pen^ pen = gcnew Pen(Color::Black);
+        float pixelsPerMM = e->Graphics->DpiY / 25.4f;
+        float scaledPixelsPerMM = pixelsPerMM * scale;
+        
+        // Draw center line
+        int centerY = centerOffset;
+        e->Graphics->DrawLine(pen, 0, centerY, this->Width, centerY);
+        
+        // Draw zero marker
+        String^ zeroText = "0";
+        SizeF zeroTextSize = e->Graphics->MeasureString(zeroText, gcnew System::Drawing::Font("Arial", 7));
+        e->Graphics->DrawString(zeroText, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, 
+            PointF(this->Width - zeroTextSize.Width, centerY - zeroTextSize.Height / 2));
+
+        // Draw ticks and labels at fixed intervals
+        int interval = 200; // Tick every 200 units
+        float scaledInterval = interval * scaledPixelsPerMM / 25.4f;
+        
+        // Draw positive ticks (below center)
+        for (int i = interval; i <= (this->Height - centerOffset) / (scaledPixelsPerMM / 25.4f); i += interval) {
+            float yPos = centerY + i * scaledPixelsPerMM / 25.4f;
+            e->Graphics->DrawLine(pen, this->Width - 10, yPos, this->Width, yPos);
+            String^ text = i.ToString();
+            SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
             
-            int newWidth = static_cast<int>(canvasWidthInMillimeters * scale);
-            int newHeight = static_cast<int>(canvasHeightInMillimeters * scale);
-            Size = System::Drawing::Size(newWidth, newHeight);
-            // Create a new list to store updated image positions
-            List<Tuple<Image^, Point>^>^ updatedImagePositions = gcnew List<Tuple<Image^, Point>^>();
+            // Draw text rotated 90 degrees
+            e->Graphics->TranslateTransform(this->Width - textSize.Height, yPos + textSize.Width / 2);
+            e->Graphics->RotateTransform(-90);
+            e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(0, 0));
+            e->Graphics->ResetTransform();
+        }
+        
+        // Draw negative ticks (above center)
+        for (int i = -interval; i >= -centerOffset / (scaledPixelsPerMM / 25.4f); i -= interval) {
+            float yPos = centerY + i * scaledPixelsPerMM / 25.4f;
+            e->Graphics->DrawLine(pen, this->Width - 10, yPos, this->Width, yPos);
+            String^ text = i.ToString();
+            SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
+            
+            // Draw text rotated 90 degrees
+            e->Graphics->TranslateTransform(this->Width - textSize.Height, yPos + textSize.Width / 2);
+            e->Graphics->RotateTransform(-90);
+            e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(0, 0));
+            e->Graphics->ResetTransform();
+        }
+    }
+};
 
-            // Adjust image positions based on the new scale
-            for each (Tuple<Image^, Point> ^ imagePosition in imagePositions)
-            {
-                Point oldPosition = imagePosition->Item2;
+public ref class CanvasControl : public Panel {
+public:
+    // Existing properties
+    int canvasWidthInMillimeters;
+    int canvasHeightInMillimeters;
+    String^ canvasSaveLocation;
+    List<Image^>^ images;
+    String^ Filepath;
+    float scaledHeightMM;
+    float scaledWidthMM;
+    String^ SelectedHeightMM;
+    String^ SelectedWidthMM;
+    bool isCropping = false;
+    Point cropStartPoint;
+    List<int>^ selectedImageIndices;
+    Point lastMousePosition;
+    Point lastImagePosition;
+    Point dragStartPoint;
+    bool isDragging;
+    System::Drawing::Rectangle cropRectangle;
+    List<Tuple<Image^, Point>^>^ imagePositions;
+    List<ImageAction^>^ undoActionHistory;
+    List<ImageAction^>^ redoActionHistory;
+    List<Tuple<Image^, Point>^>^ copiedImages;
+    List<Tuple<float, float>^>^ freeSpace;
+    String^ OriginalImagePath;
+    
+    // Add center offset properties
+    int centerX;
+    int centerY;
+    
+public:
+    delegate void DataCallback(String^ newText1, String^ newText2);
+    delegate void PointCallback(float XLocation, float YLocation);
+private:
+    DataCallback^ callbackFunction;
+    PointCallback^ pointCallBack;
+    float scale;
 
-                // Calculate the new position relative to the top-left corner of the canvas
-                int newX = static_cast<int>(oldPosition.X * (newScale / oldScale));
-                int newY = static_cast<int>(oldPosition.Y * (newScale / oldScale));
+public:
+    CanvasControl() {
+        DoubleBuffered = true;
+        SetStyle(ControlStyles::UserPaint | ControlStyles::AllPaintingInWmPaint | ControlStyles::Opaque, true);
+        BackColor = Color::White;
+        scale = 1.0f;
+        imagePositions = gcnew List<Tuple<Image^, Point>^>();
+        copiedImages = gcnew List<Tuple<Image^, Point>^>();
+        images = gcnew List<Image^>();
+        selectedImageIndices = gcnew List<int>();
+        undoActionHistory = gcnew List<ImageAction^>();
+        redoActionHistory = gcnew List<ImageAction^>();
+        freeSpace = gcnew List<Tuple<float, float>^>();
+        this->MouseDown += gcnew MouseEventHandler(this, &CanvasControl::OnMouseDown);
+        this->MouseMove += gcnew MouseEventHandler(this, &CanvasControl::OnMouseMove);
+        this->MouseUp += gcnew MouseEventHandler(this, &CanvasControl::OnMouseUp);
+    }
+    
+    void UpdateCenterPoint() {
+        // Calculate the center of the canvas
+        centerX = this->Width / 2;
+        centerY = this->Height / 2;
+    }
+    
+    void SetCanvasSize(int widthMM, int heightMM) {
+        canvasWidthInMillimeters = widthMM;
+        canvasHeightInMillimeters = heightMM;
+        
+        // Calculate pixel dimensions based on scale
+        int pixelWidth = static_cast<int>(canvasWidthInMillimeters * scale);
+        int pixelHeight = static_cast<int>(canvasHeightInMillimeters * scale);
+        
+        // Set control size
+        this->Size = System::Drawing::Size(pixelWidth, pixelHeight);
+        
+        // Update the center point
+        UpdateCenterPoint();
+        
+        Invalidate();
+    }
+    
+    void SetContextMenuStrip(System::Windows::Forms::ContextMenuStrip^ menuStrip) {
+        this->ContextMenuStrip = menuStrip;
+    }
 
-                // Add the updated image position to the new list
-                updatedImagePositions->Add(gcnew Tuple<Image^, Point>(imagePosition->Item1, Point(newX, newY)));
+    void SetScale(float newScale) {
+        float oldScale = scale;
+        scale = newScale;
+        
+        // Recalculate dimensions with new scale
+        int newWidth = static_cast<int>(canvasWidthInMillimeters * scale);
+        int newHeight = static_cast<int>(canvasHeightInMillimeters * scale);
+        Size = System::Drawing::Size(newWidth, newHeight);
+        
+        // Update center point
+        UpdateCenterPoint();
+        
+        // Create a new list to store updated image positions
+        List<Tuple<Image^, Point>^>^ updatedImagePositions = gcnew List<Tuple<Image^, Point>^>();
+
+        // Adjust image positions based on the new scale
+        for each (Tuple<Image^, Point> ^ imagePosition in imagePositions)
+        {
+            Point oldPosition = imagePosition->Item2;
+
+            // Calculate the new position relative to the center of the canvas
+            // If the position was (centerX + x, centerY + y) before,
+            // it should now be (centerX + x * (newScale/oldScale), centerY + y * (newScale/oldScale))
+            int newX = centerX + static_cast<int>((oldPosition.X - centerX) * (newScale / oldScale));
+            int newY = centerY + static_cast<int>((oldPosition.Y - centerY) * (newScale / oldScale));
+
+            // Add the updated image position to the new list
+            updatedImagePositions->Add(gcnew Tuple<Image^, Point>(imagePosition->Item1, Point(newX, newY)));
+        }
+        // Replace the existing image positions with the updated list
+        imagePositions = updatedImagePositions;
+
+        Invalidate();
+    }
+
+    float GetScale() {
+        return scale;
+    }
+    
+    // Convert from screen coordinates to canvas coordinates
+    Point ScreenToCanvas(Point screenPoint) {
+        return Point(screenPoint.X - centerX, screenPoint.Y - centerY);
+    }
+    
+    // Convert from canvas coordinates to screen coordinates
+    Point CanvasToScreen(Point canvasPoint) {
+        return Point(canvasPoint.X + centerX, canvasPoint.Y + centerY);
+    }
+
+protected:
+    virtual void OnPaint(PaintEventArgs^ e) override {
+        Panel::OnPaint(e);
+        e->Graphics->Clear(Color::White);
+        
+        // Draw canvas center crosshair (optional)
+        Pen^ centerPen = gcnew Pen(Color::LightGray);
+        e->Graphics->DrawLine(centerPen, centerX, 0, centerX, this->Height);
+        e->Graphics->DrawLine(centerPen, 0, centerY, this->Width, centerY);
+        
+        for each (Tuple<Image^, Point> ^ imagePosition in imagePositions)
+        {
+            Image^ image = imagePosition->Item1;
+            Point position = imagePosition->Item2;
+            if (image != nullptr && image->Tag != nullptr) {
+                String^ Filepath = image->Tag->ToString();
+                FindXMLFile(Filepath);
+                e->Graphics->DrawImage(image, RectangleF(position.X, position.Y, scaledWidthMM, scaledHeightMM));
             }
-            // Replace the existing image positions with the updated list
-            imagePositions = updatedImagePositions;
-
-            Invalidate();
-        }
-
-        float GetScale() {
-            return scale;
-        }
-
-    protected:
-        virtual void OnPaint(PaintEventArgs^ e) override {
-            Panel::OnPaint(e);
-            e->Graphics->Clear(Color::White);
-            for each (Tuple<Image^, Point> ^ imagePosition in imagePositions)
+            else {
+                Console::WriteLine("Image or Tag property is null.");
+            }
+            if (selectedImageIndices->Contains(imagePositions->IndexOf(imagePosition)))
             {
-                Image^ image = imagePosition->Item1;
-                Point position = imagePosition->Item2;
-                if (image != nullptr && image->Tag != nullptr) {
-                    String^ Filepath = image->Tag->ToString();
-                    FindXMLFile(Filepath);
-                    e->Graphics->DrawImage(image, RectangleF(position.X, position.Y, scaledWidthMM, scaledHeightMM));
-                }
-                else {
-                    Console::WriteLine("Image or Tag property is null.");
-                }
-                if (selectedImageIndices->Contains(imagePositions->IndexOf(imagePosition)))
-                {
-                    Pen^ framePen = gcnew Pen(Color::Blue);
-                    e->Graphics->DrawRectangle(static_cast<Drawing::Pen^>(framePen), position.X, position.Y, static_cast<int>(scaledWidthMM), static_cast<int>(scaledHeightMM));
-                    int handleSize = 6;
-                    // Fill rectangle for resize handles
-                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X - handleSize / 2, position.Y - handleSize / 2, handleSize, handleSize);
-                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X + static_cast<int>(scaledWidthMM) - handleSize / 2, position.Y - handleSize / 2, handleSize, handleSize);
-                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X - handleSize / 2, position.Y + static_cast<int>(scaledHeightMM) - handleSize / 2, handleSize, handleSize);
-                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X + static_cast<int>(scaledWidthMM) - handleSize / 2, position.Y + static_cast<int>(scaledHeightMM) - handleSize / 2, handleSize, handleSize);
-                }
+                Pen^ framePen = gcnew Pen(Color::Blue);
+                e->Graphics->DrawRectangle(static_cast<Drawing::Pen^>(framePen), position.X, position.Y, static_cast<int>(scaledWidthMM), static_cast<int>(scaledHeightMM));
+                int handleSize = 6;
+                // Fill rectangle for resize handles
+                e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X - handleSize / 2, position.Y - handleSize / 2, handleSize, handleSize);
+                e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X + static_cast<int>(scaledWidthMM) - handleSize / 2, position.Y - handleSize / 2, handleSize, handleSize);
+                e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X - handleSize / 2, position.Y + static_cast<int>(scaledHeightMM) - handleSize / 2, handleSize, handleSize);
+                e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X + static_cast<int>(scaledWidthMM) - handleSize / 2, position.Y + static_cast<int>(scaledHeightMM) - handleSize / 2, handleSize, handleSize);
             }
         }
+    }
 
-        void FindXMLFile(String^ path) {
-            try {
-                String^ directoryPath = System::IO::Path::GetDirectoryName(path);
-                System::IO::DirectoryInfo^ directory = gcnew System::IO::DirectoryInfo(directoryPath);
-                array<System::IO::DirectoryInfo^>^ subDirectories = directory->GetDirectories("XML", System::IO::SearchOption::AllDirectories);
-                if (subDirectories->Length > 0) {
-                    System::IO::DirectoryInfo^ xmlFolder = subDirectories[0];
-                    String^ fileName = System::IO::Path::GetFileNameWithoutExtension(path);
-                    array<System::IO::FileInfo^>^ xmlFiles = xmlFolder->GetFiles(fileName + ".xml", System::IO::SearchOption::TopDirectoryOnly);
-                    if (xmlFiles->Length > 0) {
-                        XmlDocument^ xmlDoc = gcnew XmlDocument();
-                        xmlDoc->Load(xmlFiles[0]->FullName);
-                        XmlNode^ widthNode = xmlDoc->SelectSingleNode("//width");
-                        XmlNode^ heightNode = xmlDoc->SelectSingleNode("//height");
-                        XmlNode^ ImagePathNode = xmlDoc->SelectSingleNode("//ImagePath");
+    // FindXMLFile method stays the same
+    void FindXMLFile(String^ path) {
+        // Existing implementation
+        try {
+            String^ directoryPath = System::IO::Path::GetDirectoryName(path);
+            System::IO::DirectoryInfo^ directory = gcnew System::IO::DirectoryInfo(directoryPath);
+            array<System::IO::DirectoryInfo^>^ subDirectories = directory->GetDirectories("XML", System::IO::SearchOption::AllDirectories);
+            if (subDirectories->Length > 0) {
+                System::IO::DirectoryInfo^ xmlFolder = subDirectories[0];
+                String^ fileName = System::IO::Path::GetFileNameWithoutExtension(path);
+                array<System::IO::FileInfo^>^ xmlFiles = xmlFolder->GetFiles(fileName + ".xml", System::IO::SearchOption::TopDirectoryOnly);
+                if (xmlFiles->Length > 0) {
+                    XmlDocument^ xmlDoc = gcnew XmlDocument();
+                    xmlDoc->Load(xmlFiles[0]->FullName);
+                    XmlNode^ widthNode = xmlDoc->SelectSingleNode("//width");
+                    XmlNode^ heightNode = xmlDoc->SelectSingleNode("//height");
+                    XmlNode^ ImagePathNode = xmlDoc->SelectSingleNode("//ImagePath");
 
-                        if (widthNode != nullptr && heightNode != nullptr) {
-                            // Assign values to variables
-                            scaledWidthMM = Single::Parse(widthNode->InnerText) * 3.779528 * scale;
-                            scaledHeightMM = Single::Parse(heightNode->InnerText) * 3.779528 * scale;
-                            SelectedWidthMM = widthNode->InnerText;
-                            SelectedHeightMM = heightNode->InnerText;
-                            OriginalImagePath = ImagePathNode->InnerText;
-                        }
-                        else {
-                            Console::WriteLine("Width or height not found in XML.");
-                        }
+                    if (widthNode != nullptr && heightNode != nullptr) {
+                        // Assign values to variables
+                        scaledWidthMM = Single::Parse(widthNode->InnerText) * 3.779528 * scale;
+                        scaledHeightMM = Single::Parse(heightNode->InnerText) * 3.779528 * scale;
+                        SelectedWidthMM = widthNode->InnerText;
+                        SelectedHeightMM = heightNode->InnerText;
+                        OriginalImagePath = ImagePathNode->InnerText;
                     }
                     else {
-                        Console::WriteLine("XML file not found.");
+                        Console::WriteLine("Width or height not found in XML.");
                     }
                 }
                 else {
-                    Console::WriteLine("XML folder not found.");
+                    Console::WriteLine("XML file not found.");
                 }
             }
-            catch (Exception^ e) {
-                Console::WriteLine("An error occurred: " + e->Message);
+            else {
+                Console::WriteLine("XML folder not found.");
             }
         }
-    public:
-        void SetCallback(DataCallback^ callback)
-        {
-            callbackFunction = callback;
+        catch (Exception^ e) {
+            Console::WriteLine("An error occurred: " + e->Message);
         }
+    }
 
-        void SetPointback(PointCallback^ callback)
+public:
+    void SetCallback(DataCallback^ callback)
+    {
+        callbackFunction = callback;
+    }
+
+    void SetPointback(PointCallback^ callback)
+    {
+        pointCallBack = callback;
+    }
+
+    void OnMouseDown(Object^ sender, MouseEventArgs^ e)
+    {
+        if (isCropping)
         {
-            pointCallBack = callback;
+            isDragging = true;
+            cropStartPoint = e->Location;
         }
-
-        void OnMouseDown(Object^ sender, MouseEventArgs^ e)
+        else
         {
-            if (isCropping)
+            bool clickedOnImage = false; // Flag to track if clicked on any image
+            if (Control::ModifierKeys == Keys::Control)
             {
-                isDragging = true;
-                cropStartPoint = e->Location;
+                // Handle Ctrl+click selection (existing code)
             }
             else
             {
-                bool clickedOnImage = false; // Flag to track if clicked on any image
-                if (Control::ModifierKeys == Keys::Control)
+                for (int i = 0; i < imagePositions->Count; i++)
                 {
-                   
+                    Tuple<Image^, Point>^ imagePosition = imagePositions[i];
+                    Image^ image = imagePosition->Item1;
+                    Point position = imagePosition->Item2;
+                    Filepath = image->Tag->ToString();
+                    FindXMLFile(Filepath);
+                    int scaledWidth = static_cast<int>(scaledWidthMM);
+                    int scaledHeight = static_cast<int>(scaledHeightMM);
+                    System::Drawing::Rectangle imageRect = System::Drawing::Rectangle(position.X, position.Y, scaledWidth, scaledHeight);
+                    if (imageRect.Contains(e->Location))
+                    {
+                        clickedOnImage = true; // Set the flag if clicked on any image
+                        selectedImageIndices->Clear();
+                        selectedImageIndices->Add(i);
+                        isDragging = true;
+                        lastMousePosition = e->Location;
+                        lastImagePosition = position;
+                        Invalidate();
+                        
+                        // Convert the image position to canvas coordinates (relative to center)
+                        Point canvasPosition = ScreenToCanvas(position);
+                        
+                        if (callbackFunction != nullptr)
+                        {
+                            callbackFunction(SelectedWidthMM, SelectedHeightMM);
+                        }
+                        
+                        if (pointCallBack != nullptr)
+                        {
+                            pointCallBack(canvasPosition.X, canvasPosition.Y);
+                        }
+                    }
                 }
-                else
+            }
+            if (!clickedOnImage)
+            {
+                selectedImageIndices->Clear();
+                Invalidate();
+            }
+        }
+    }
+
+    void OnMouseMove(Object^ sender, MouseEventArgs^ e)
+    {
+        if (isCropping)
+        {
+            // Handle cropping behavior
+            if (isDragging && e->Button == System::Windows::Forms::MouseButtons::Left)
+            {
+                cropRectangle = Rectangle::FromLTRB(cropStartPoint.X, cropStartPoint.Y, e->Location.X, e->Location.Y);
+                Invalidate();
+            }
+        }
+        else
+        {
+            if (isDragging) // If dragging for moving images is in progress
+            {
+                int offsetX = e->Location.X - lastMousePosition.X;
+                int offsetY = e->Location.Y - lastMousePosition.Y;
+
+                // Update positions of selected images
+                for each (int selectedIndex in selectedImageIndices)
                 {
+                    Tuple<Image^, Point>^ imagePosition = imagePositions[selectedIndex];
+                    Point originalPosition = imagePosition->Item2;
+                    Point newPosition = Point(originalPosition.X + offsetX, originalPosition.Y + offsetY);
+                    imagePositions[selectedIndex] = gcnew Tuple<Image^, Point>(imagePosition->Item1, newPosition);
+
+                    // Convert to canvas coordinates (relative to center)
+                    Point canvasPosition = ScreenToCanvas(newPosition);
+                    
+                    if (pointCallBack != nullptr)
+                    {
+                        pointCallBack(canvasPosition.X, canvasPosition.Y);
+                    }
+                }
+                lastMousePosition = e->Location;
+                Invalidate();
+            }
+            else // If not dragging for moving images
+            {
+                if ((e->Button & System::Windows::Forms::MouseButtons::Left) == System::Windows::Forms::MouseButtons::Left)
+                {
+                    // Clear previous selected images
+                    selectedImageIndices->Clear();
+
+                    // Find images that are within the current mouse position
                     for (int i = 0; i < imagePositions->Count; i++)
                     {
                         Tuple<Image^, Point>^ imagePosition = imagePositions[i];
@@ -314,138 +500,69 @@ namespace Nesting {
                         int scaledWidth = static_cast<int>(scaledWidthMM);
                         int scaledHeight = static_cast<int>(scaledHeightMM);
                         System::Drawing::Rectangle imageRect = System::Drawing::Rectangle(position.X, position.Y, scaledWidth, scaledHeight);
+
+                        // Check if the mouse is within the bounds of the image
                         if (imageRect.Contains(e->Location))
                         {
-                            clickedOnImage = true; // Set the flag if clicked on any image
-                            selectedImageIndices->Clear();
+                            // Add the index of the image to the selected images
                             selectedImageIndices->Add(i);
-                            isDragging = true;
-                            lastMousePosition = e->Location;
-                            lastImagePosition = position;
-                            Invalidate();
-
-                            if (callbackFunction != nullptr)
-                            {
-                                callbackFunction(SelectedWidthMM, SelectedHeightMM);
-                            }
                         }
                     }
-                }
-                if (!clickedOnImage)
-                {
-                    selectedImageIndices->Clear();
-                    Invalidate();
+
+                    // Check if any image was selected
+                    if (selectedImageIndices->Count > 0)
+                    {
+                        // Start dragging
+                        isDragging = true;
+                        lastMousePosition = e->Location;
+
+                        // Redraw the canvas
+                        Invalidate();
+                    }
                 }
             }
         }
+    }
 
-        void OnMouseMove(Object^ sender, MouseEventArgs^ e)
+    void OnMouseUp(Object^ sender, MouseEventArgs^ e)
+    {
+        if (isCropping)
         {
-            if (isCropping)
+            isCropping = false;
+            isDragging = false;
+            this->Cursor = Cursors::Default;
+            if (cropRectangle.Width > 0 && cropRectangle.Height > 0)
             {
-                // Handle cropping behavior
-                if (isDragging && e->Button == System::Windows::Forms::MouseButtons::Left)
+                Tuple<Image^, Point>^ imagePosition = imagePositions[selectedImageIndices[0]];
+                Image^ originalImage = imagePosition->Item1;
+                Bitmap^ croppedImage = gcnew Bitmap(cropRectangle.Width, cropRectangle.Height);
                 {
-                    cropRectangle = Rectangle::FromLTRB(cropStartPoint.X, cropStartPoint.Y, e->Location.X, e->Location.Y);
-                    Invalidate();
+                    Graphics^ g = Graphics::FromImage(croppedImage);
+                    g->DrawImage(originalImage, 0, 0, cropRectangle, GraphicsUnit::Pixel);
                 }
-            }
-            else
-            {
-                if (isDragging) // If dragging for moving images is in progress
-                {
-                    int offsetX = e->Location.X - lastMousePosition.X;
-                    int offsetY = e->Location.Y - lastMousePosition.Y;
-
-                    // Update positions of selected images
-                    for each (int selectedIndex in selectedImageIndices)
-                    {
-                        Tuple<Image^, Point>^ imagePosition = imagePositions[selectedIndex];
-                        Point originalPosition = imagePosition->Item2;
-                        Point newPosition = Point(originalPosition.X + offsetX, originalPosition.Y + offsetY);
-                        imagePositions[selectedIndex] = gcnew Tuple<Image^, Point>(imagePosition->Item1, newPosition);
-
-                        Point imageCanvasPosition = Point(newPosition.X, newPosition.Y);
-                        if (pointCallBack != nullptr)
-                        {
-                            pointCallBack((imageCanvasPosition.X), imageCanvasPosition.Y);
-                        }
-                    }
-                    lastMousePosition = e->Location;
-                    Invalidate();
-                }
-                else // If not dragging for moving images
-                {
-                    if ((e->Button & System::Windows::Forms::MouseButtons::Left) == System::Windows::Forms::MouseButtons::Left)
-                    {
-                        // Clear previous selected images
-                        selectedImageIndices->Clear();
-
-                        // Find images that are within the current mouse position
-                        for (int i = 0; i < imagePositions->Count; i++)
-                        {
-                            Tuple<Image^, Point>^ imagePosition = imagePositions[i];
-                            Image^ image = imagePosition->Item1;
-                            Point position = imagePosition->Item2;
-                            Filepath = image->Tag->ToString();
-                            FindXMLFile(Filepath);
-                            int scaledWidth = static_cast<int>(scaledWidthMM);
-                            int scaledHeight = static_cast<int>(scaledHeightMM);
-                            System::Drawing::Rectangle imageRect = System::Drawing::Rectangle(position.X, position.Y, scaledWidth, scaledHeight);
-
-                            // Check if the mouse is within the bounds of the image
-                            if (imageRect.Contains(e->Location))
-                            {
-                                // Add the index of the image to the selected images
-                                selectedImageIndices->Add(i);
-                            }
-                        }
-
-                        // Check if any image was selected
-                        if (selectedImageIndices->Count > 0)
-                        {
-                            // Start dragging
-                            isDragging = true;
-                            lastMousePosition = e->Location;
-
-                            // Redraw the canvas
-                            Invalidate();
-                        }
-                    }
-                }
+                Point mousePosition = this->PointToClient(Control::MousePosition);
+                imagePositions->Add(Tuple::Create((Image^)croppedImage, mousePosition));
+                Invalidate();
             }
         }
-
-        void OnMouseUp(Object^ sender, MouseEventArgs^ e)
+        else
         {
-            if (isCropping)
-            {
-                isCropping = false;
-                isDragging = false;
-                this->Cursor = Cursors::Default;
-                if (cropRectangle.Width > 0 && cropRectangle.Height > 0)
-                {
-                    Tuple<Image^, Point>^ imagePosition = imagePositions[selectedImageIndices[0]];
-                    Image^ originalImage = imagePosition->Item1;
-                    Bitmap^ croppedImage = gcnew Bitmap(cropRectangle.Width, cropRectangle.Height);
-                    {
-                        Graphics^ g = Graphics::FromImage(croppedImage);
-                        g->DrawImage(originalImage, 0, 0, cropRectangle, GraphicsUnit::Pixel);
-                    }
-                    Point mousePosition = this->PointToClient(Control::MousePosition);
-                    imagePositions->Add(Tuple::Create((Image^)croppedImage, mousePosition));
-                    Invalidate();
-                }
-            }
-            else
-            {
-                isDragging = false;
-            }
+            isDragging = false;
         }
-
-    private:
-        float scale;
-    };
+    }
+    
+    // Add a method to add an image at the center of the canvas
+    void AddImageAtCenter(Image^ image) {
+        if (image != nullptr) {
+            // Calculate position so image is centered
+            int xPos = centerX - (static_cast<int>(scaledWidthMM) / 2);
+            int yPos = centerY - (static_cast<int>(scaledHeightMM) / 2);
+            
+            imagePositions->Add(gcnew Tuple<Image^, Point>(image, Point(xPos, yPos)));
+            Invalidate();
+        }
+    }
+};
    
     public ref class MyForm : public System::Windows::Forms::Form {
     public:
