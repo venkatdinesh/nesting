@@ -1,0 +1,2742 @@
+#pragma once
+#include "MyForm.h"
+#include <vector>
+#include <vcclr.h>
+#include <Windows.h> // Required for GetDeviceCaps function
+#include "LinearChart.h"
+
+namespace Nesting {
+    using namespace System;
+    using namespace System::ComponentModel;
+    using namespace System::Collections;
+    using namespace System::Windows::Forms;
+    using namespace System::Drawing;
+    using namespace System::Collections::Generic;
+    using namespace PdfSharp::Pdf;
+    using namespace PdfSharp::Drawing;
+    using namespace System::Xml;
+    using namespace ZXing;
+
+    public ref struct ImageAction
+    {
+        int index;              // Index of the image in the imagePositions list
+        bool added;             // Whether the image was added (true) or removed (false)
+        Point originalPosition; // Original position of the image before it was moved
+        Point newPosition;
+    };
+
+    public ref class HorizontalRulerControl : public System::Windows::Forms::Control {
+    private:
+        float scale;
+
+    public:
+        HorizontalRulerControl(int width) {
+            this->Width = width + 100;
+            this->Height = 13;
+            this->BackColor = Color::White;
+            this->DoubleBuffered = true;
+            this->Visible = true;
+            scale = 1.0f; // Initialize scale
+        }
+
+        void SetCanvasScale(float newScale) {
+            scale = newScale;
+            this->Invalidate(); // Redraw the ruler
+        }
+
+    protected:
+        virtual void OnPaint(PaintEventArgs^ e) override {
+            Control::OnPaint(e);
+
+            Pen^ pen = gcnew Pen(Color::Black);
+            float pixelsPerMM = e->Graphics->DpiX / 25.4f;
+            float scaledPixelsPerMM = pixelsPerMM * scale;
+            float factor = this->Width / 100.0f;
+            int numTicks = (int)(this->Width / (scaledPixelsPerMM * factor));
+            //int numTicks = 20; // Number of ticks per pixel
+
+            int canvasStartY = 10;
+           
+
+            for (int i = canvasStartY; i <= this->Width + canvasStartY; i += (scaledPixelsPerMM * numTicks) / 3) {
+                int xPos = i;
+                e->Graphics->DrawLine(pen, xPos, 0, xPos, 20);
+                String^ text = Math::Round((i - canvasStartY) / scaledPixelsPerMM).ToString();
+                SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
+                e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(xPos, 0));
+            }
+        }
+    };
+
+    public ref class VerticalRulerControl : public System::Windows::Forms::Control {
+    private:
+        float scale;
+
+    public:
+        VerticalRulerControl(int height) {
+            this->Width = 13;
+            this->Height = height+ 20;
+            this->BackColor = Color::White;
+            this->DoubleBuffered = true;
+            this->Visible = true;
+            scale = 1.0f; // Initialize scale
+        }
+
+        void SetCanvasScale(float newScale) {
+            scale = newScale;
+            this->Invalidate(); // Redraw the ruler
+        }
+
+    protected:
+        virtual void OnPaint(PaintEventArgs^ e) override {
+            Control::OnPaint(e);
+
+            Pen^ pen = gcnew Pen(Color::Black);
+            float pixelsPerMM = e->Graphics->DpiX / 25.4f;
+            float scaledPixelsPerMM = pixelsPerMM * scale;
+            float factor = this->Height / 100.0f;
+            int numTicks = (int)(this->Height / (scaledPixelsPerMM * factor));
+
+            int canvasStartY = 10;
+            e->Graphics->DrawLine(pen, 0, canvasStartY, 20, canvasStartY);
+
+            String^ zeroText = "0";
+            SizeF zeroTextSize = e->Graphics->MeasureString(zeroText, gcnew System::Drawing::Font("Arial", 7));
+            e->Graphics->DrawString(zeroText, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(0, 0));
+
+            for (int i = 0; i <= this->Height + canvasStartY; i += (scaledPixelsPerMM * numTicks)/3) {
+                int dpiX = 0;
+                int yPos = i;
+                e->Graphics->DrawLine(pen, 0, i, 20, i);
+                String^ text = Math::Round((i - canvasStartY) / scaledPixelsPerMM).ToString();
+                SizeF textSize = e->Graphics->MeasureString(text, gcnew System::Drawing::Font("Arial", 7));
+                e->Graphics->TranslateTransform(dpiX, yPos);
+                e->Graphics->RotateTransform(-90);
+                e->Graphics->DrawString(text, gcnew System::Drawing::Font("Arial", 7), Brushes::Black, PointF(0, 0));
+                e->Graphics->ResetTransform();
+            }
+        }
+    };
+
+    public ref class CanvasControl : public Panel {
+
+    public:
+        int canvasWidthInMillimeters;
+        int canvasHeightInMillimeters;
+        String^ canvasSaveLocation;
+        List<Image^>^ images;
+        String^ Filepath;
+        float scaledHeightMM;
+        float scaledWidthMM;
+        String^ SelectedHeightMM;
+        String^ SelectedWidthMM;
+        bool isCropping = false;
+        Point cropStartPoint;
+        List<int>^ selectedImageIndices;
+        Point lastMousePosition;
+        Point lastImagePosition;
+        Point dragStartPoint;
+        bool isDragging;
+        System::Drawing::Rectangle cropRectangle;
+        List<Tuple<Image^, Point>^>^ imagePositions;
+        List<ImageAction^>^ undoActionHistory;
+        List<ImageAction^>^ redoActionHistory;
+        List<Tuple<Image^, Point>^>^ copiedImages;
+        List<Tuple<float, float>^>^ freeSpace;
+        String^ OriginalImagePath;
+        
+    public:
+        delegate void DataCallback(String^ newText1, String^ newText2);
+        delegate void PointCallback(float XLoacation, float Ylocation);
+    private:
+        DataCallback^ callbackFunction;
+        PointCallback^ pointCallBack;
+
+    public:
+        CanvasControl() {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles::UserPaint | ControlStyles::AllPaintingInWmPaint | ControlStyles::Opaque, true);
+            BackColor = Color::White;
+            scale = 1.0f;
+            SetStyle(ControlStyles::UserPaint | ControlStyles::AllPaintingInWmPaint | ControlStyles::Opaque, true);
+            imagePositions = gcnew List<Tuple<Image^, Point>^>();
+            copiedImages = gcnew List<Tuple<Image^, Point>^>();
+            images = gcnew List<Image^>();
+            selectedImageIndices = gcnew List<int>();
+            undoActionHistory = gcnew List<ImageAction^>();
+            redoActionHistory = gcnew List<ImageAction^>();
+            freeSpace = gcnew List<Tuple<float, float>^>();
+            this->MouseDown += gcnew MouseEventHandler(this, &CanvasControl::OnMouseDown);
+            this->MouseMove += gcnew MouseEventHandler(this, &CanvasControl::OnMouseMove);
+            this->MouseUp += gcnew MouseEventHandler(this, &CanvasControl::OnMouseUp);
+        }
+       
+        void SetContextMenuStrip(System::Windows::Forms::ContextMenuStrip^ menuStrip) {
+            this->ContextMenuStrip = menuStrip;
+        }
+
+        void SetScale(float newScale) {
+            float oldScale = scale;
+            scale = newScale;
+            
+            int newWidth = static_cast<int>(canvasWidthInMillimeters * scale);
+            int newHeight = static_cast<int>(canvasHeightInMillimeters * scale);
+            Size = System::Drawing::Size(newWidth, newHeight);
+            // Create a new list to store updated image positions
+            List<Tuple<Image^, Point>^>^ updatedImagePositions = gcnew List<Tuple<Image^, Point>^>();
+
+            // Adjust image positions based on the new scale
+            for each (Tuple<Image^, Point> ^ imagePosition in imagePositions)
+            {
+                Point oldPosition = imagePosition->Item2;
+
+                // Calculate the new position relative to the top-left corner of the canvas
+                int newX = static_cast<int>(oldPosition.X * (newScale / oldScale));
+                int newY = static_cast<int>(oldPosition.Y * (newScale / oldScale));
+
+                // Add the updated image position to the new list
+                updatedImagePositions->Add(gcnew Tuple<Image^, Point>(imagePosition->Item1, Point(newX, newY)));
+            }
+            // Replace the existing image positions with the updated list
+            imagePositions = updatedImagePositions;
+
+            Invalidate();
+        }
+
+        float GetScale() {
+            return scale;
+        }
+
+    protected:
+        virtual void OnPaint(PaintEventArgs^ e) override {
+            Panel::OnPaint(e);
+            e->Graphics->Clear(Color::White);
+            for each (Tuple<Image^, Point> ^ imagePosition in imagePositions)
+            {
+                Image^ image = imagePosition->Item1;
+                Point position = imagePosition->Item2;
+                if (image != nullptr && image->Tag != nullptr) {
+                    String^ Filepath = image->Tag->ToString();
+                    FindXMLFile(Filepath);
+                    e->Graphics->DrawImage(image, RectangleF(position.X, position.Y, scaledWidthMM, scaledHeightMM));
+                }
+                else {
+                    Console::WriteLine("Image or Tag property is null.");
+                }
+                if (selectedImageIndices->Contains(imagePositions->IndexOf(imagePosition)))
+                {
+                    Pen^ framePen = gcnew Pen(Color::Blue);
+                    e->Graphics->DrawRectangle(static_cast<Drawing::Pen^>(framePen), position.X, position.Y, static_cast<int>(scaledWidthMM), static_cast<int>(scaledHeightMM));
+                    int handleSize = 6;
+                    // Fill rectangle for resize handles
+                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X - handleSize / 2, position.Y - handleSize / 2, handleSize, handleSize);
+                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X + static_cast<int>(scaledWidthMM) - handleSize / 2, position.Y - handleSize / 2, handleSize, handleSize);
+                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X - handleSize / 2, position.Y + static_cast<int>(scaledHeightMM) - handleSize / 2, handleSize, handleSize);
+                    e->Graphics->FillRectangle(static_cast<Drawing::Brush^>(gcnew SolidBrush(Color::Blue)), position.X + static_cast<int>(scaledWidthMM) - handleSize / 2, position.Y + static_cast<int>(scaledHeightMM) - handleSize / 2, handleSize, handleSize);
+                }
+            }
+        }
+
+        void FindXMLFile(String^ path) {
+            try {
+                String^ directoryPath = System::IO::Path::GetDirectoryName(path);
+                System::IO::DirectoryInfo^ directory = gcnew System::IO::DirectoryInfo(directoryPath);
+                array<System::IO::DirectoryInfo^>^ subDirectories = directory->GetDirectories("XML", System::IO::SearchOption::AllDirectories);
+                if (subDirectories->Length > 0) {
+                    System::IO::DirectoryInfo^ xmlFolder = subDirectories[0];
+                    String^ fileName = System::IO::Path::GetFileNameWithoutExtension(path);
+                    array<System::IO::FileInfo^>^ xmlFiles = xmlFolder->GetFiles(fileName + ".xml", System::IO::SearchOption::TopDirectoryOnly);
+                    if (xmlFiles->Length > 0) {
+                        XmlDocument^ xmlDoc = gcnew XmlDocument();
+                        xmlDoc->Load(xmlFiles[0]->FullName);
+                        XmlNode^ widthNode = xmlDoc->SelectSingleNode("//width");
+                        XmlNode^ heightNode = xmlDoc->SelectSingleNode("//height");
+                        XmlNode^ ImagePathNode = xmlDoc->SelectSingleNode("//ImagePath");
+
+                        if (widthNode != nullptr && heightNode != nullptr) {
+                            // Assign values to variables
+                            scaledWidthMM = Single::Parse(widthNode->InnerText) * 3.779528 * scale;
+                            scaledHeightMM = Single::Parse(heightNode->InnerText) * 3.779528 * scale;
+                            SelectedWidthMM = widthNode->InnerText;
+                            SelectedHeightMM = heightNode->InnerText;
+                            OriginalImagePath = ImagePathNode->InnerText;
+                        }
+                        else {
+                            Console::WriteLine("Width or height not found in XML.");
+                        }
+                    }
+                    else {
+                        Console::WriteLine("XML file not found.");
+                    }
+                }
+                else {
+                    Console::WriteLine("XML folder not found.");
+                }
+            }
+            catch (Exception^ e) {
+                Console::WriteLine("An error occurred: " + e->Message);
+            }
+        }
+    public:
+        void SetCallback(DataCallback^ callback)
+        {
+            callbackFunction = callback;
+        }
+
+        void SetPointback(PointCallback^ callback)
+        {
+            pointCallBack = callback;
+        }
+
+        void OnMouseDown(Object^ sender, MouseEventArgs^ e)
+        {
+            if (isCropping)
+            {
+                isDragging = true;
+                cropStartPoint = e->Location;
+            }
+            else
+            {
+                bool clickedOnImage = false; // Flag to track if clicked on any image
+                if (Control::ModifierKeys == Keys::Control)
+                {
+                   
+                }
+                else
+                {
+                    for (int i = 0; i < imagePositions->Count; i++)
+                    {
+                        Tuple<Image^, Point>^ imagePosition = imagePositions[i];
+                        Image^ image = imagePosition->Item1;
+                        Point position = imagePosition->Item2;
+                        Filepath = image->Tag->ToString();
+                        FindXMLFile(Filepath);
+                        int scaledWidth = static_cast<int>(scaledWidthMM);
+                        int scaledHeight = static_cast<int>(scaledHeightMM);
+                        System::Drawing::Rectangle imageRect = System::Drawing::Rectangle(position.X, position.Y, scaledWidth, scaledHeight);
+                        if (imageRect.Contains(e->Location))
+                        {
+                            clickedOnImage = true; // Set the flag if clicked on any image
+                            selectedImageIndices->Clear();
+                            selectedImageIndices->Add(i);
+                            isDragging = true;
+                            lastMousePosition = e->Location;
+                            lastImagePosition = position;
+                            Invalidate();
+
+                            if (callbackFunction != nullptr)
+                            {
+                                callbackFunction(SelectedWidthMM, SelectedHeightMM);
+                            }
+                        }
+                    }
+                }
+                if (!clickedOnImage)
+                {
+                    selectedImageIndices->Clear();
+                    Invalidate();
+                }
+            }
+        }
+
+        void OnMouseMove(Object^ sender, MouseEventArgs^ e)
+        {
+            if (isCropping)
+            {
+                // Handle cropping behavior
+                if (isDragging && e->Button == System::Windows::Forms::MouseButtons::Left)
+                {
+                    cropRectangle = Rectangle::FromLTRB(cropStartPoint.X, cropStartPoint.Y, e->Location.X, e->Location.Y);
+                    Invalidate();
+                }
+            }
+            else
+            {
+                if (isDragging) // If dragging for moving images is in progress
+                {
+                    int offsetX = e->Location.X - lastMousePosition.X;
+                    int offsetY = e->Location.Y - lastMousePosition.Y;
+
+                    // Update positions of selected images
+                    for each (int selectedIndex in selectedImageIndices)
+                    {
+                        Tuple<Image^, Point>^ imagePosition = imagePositions[selectedIndex];
+                        Point originalPosition = imagePosition->Item2;
+                        Point newPosition = Point(originalPosition.X + offsetX, originalPosition.Y + offsetY);
+                        imagePositions[selectedIndex] = gcnew Tuple<Image^, Point>(imagePosition->Item1, newPosition);
+
+                        Point imageCanvasPosition = Point(newPosition.X, newPosition.Y);
+                        if (pointCallBack != nullptr)
+                        {
+                            pointCallBack((imageCanvasPosition.X), imageCanvasPosition.Y);
+                        }
+                    }
+                    lastMousePosition = e->Location;
+                    Invalidate();
+                }
+                else // If not dragging for moving images
+                {
+                    if ((e->Button & System::Windows::Forms::MouseButtons::Left) == System::Windows::Forms::MouseButtons::Left)
+                    {
+                        // Clear previous selected images
+                        selectedImageIndices->Clear();
+
+                        // Find images that are within the current mouse position
+                        for (int i = 0; i < imagePositions->Count; i++)
+                        {
+                            Tuple<Image^, Point>^ imagePosition = imagePositions[i];
+                            Image^ image = imagePosition->Item1;
+                            Point position = imagePosition->Item2;
+                            Filepath = image->Tag->ToString();
+                            FindXMLFile(Filepath);
+                            int scaledWidth = static_cast<int>(scaledWidthMM);
+                            int scaledHeight = static_cast<int>(scaledHeightMM);
+                            System::Drawing::Rectangle imageRect = System::Drawing::Rectangle(position.X, position.Y, scaledWidth, scaledHeight);
+
+                            // Check if the mouse is within the bounds of the image
+                            if (imageRect.Contains(e->Location))
+                            {
+                                // Add the index of the image to the selected images
+                                selectedImageIndices->Add(i);
+                            }
+                        }
+
+                        // Check if any image was selected
+                        if (selectedImageIndices->Count > 0)
+                        {
+                            // Start dragging
+                            isDragging = true;
+                            lastMousePosition = e->Location;
+
+                            // Redraw the canvas
+                            Invalidate();
+                        }
+                    }
+                }
+            }
+        }
+
+        void OnMouseUp(Object^ sender, MouseEventArgs^ e)
+        {
+            if (isCropping)
+            {
+                isCropping = false;
+                isDragging = false;
+                this->Cursor = Cursors::Default;
+                if (cropRectangle.Width > 0 && cropRectangle.Height > 0)
+                {
+                    Tuple<Image^, Point>^ imagePosition = imagePositions[selectedImageIndices[0]];
+                    Image^ originalImage = imagePosition->Item1;
+                    Bitmap^ croppedImage = gcnew Bitmap(cropRectangle.Width, cropRectangle.Height);
+                    {
+                        Graphics^ g = Graphics::FromImage(croppedImage);
+                        g->DrawImage(originalImage, 0, 0, cropRectangle, GraphicsUnit::Pixel);
+                    }
+                    Point mousePosition = this->PointToClient(Control::MousePosition);
+                    imagePositions->Add(Tuple::Create((Image^)croppedImage, mousePosition));
+                    Invalidate();
+                }
+            }
+            else
+            {
+                isDragging = false;
+            }
+        }
+
+    private:
+        float scale;
+    };
+   
+    public ref class MyForm : public System::Windows::Forms::Form {
+    public:
+        MyForm() {
+            
+            this->KeyPreview = true;
+            Text = "Nesting Pro";
+            Size = Drawing::Size(1366, 765);
+            MinimumSize = System::Drawing::Size(1366, 765);
+            BackColor = Color::FromArgb(64, 64, 64);
+            this->Resize += gcnew EventHandler(this, &MyForm::MyForm_Resize);
+            this->StartPosition = FormStartPosition::CenterScreen;
+            previousWidth = this->Width;
+            previousHeight = this->Height;
+
+            scrollPanel = gcnew Panel();
+            scrollPanel->Dock = DockStyle::Fill;
+            scrollPanel->AutoScroll = true;
+            scrollPanel->BackColor = Color::FromArgb(64, 64, 64);
+            scrollPanel->Anchor = AnchorStyles::Top | AnchorStyles::Left;
+
+            contextMenuStrip = gcnew System::Windows::Forms::ContextMenuStrip();
+            canvasContainerPanel = gcnew Panel();
+            canvasContainerPanel->BackColor = Color::FromArgb(64, 64, 64);
+            canvasContainerPanel->AutoSize = true;
+            canvasContainerPanel->Size = System::Drawing::Size(this->Width + 10, this->Height + 10);
+            
+            canvasContainerPanel->Location = Point(0, 0);
+            canvas = gcnew CanvasControl();
+            canvas->Dock = DockStyle::None;
+            canvas->AutoSize = false;
+            canvas->Location = Point(23, 23);
+            canvas->Size = System::Drawing::Size(0, 0);
+  
+            horizontalRuler = gcnew HorizontalRulerControl(27337);
+            horizontalRuler->Dock = DockStyle::None;
+            horizontalRuler->Location = Point(13, 0);
+
+            verticalRuler = gcnew VerticalRulerControl(94488);
+            verticalRuler->Dock = DockStyle::None;
+            verticalRuler->Location = Point(0, 13);
+
+            canvasContainerPanel->Controls->Add(canvas);
+            scrollPanel->Controls->Add(canvasContainerPanel);
+            Controls->Add(horizontalRuler);
+            Controls->Add(verticalRuler);
+            Controls->Add(scrollPanel);
+
+            ToolPanelForm();
+            ToolControlForm();
+            NewNestingForm();
+            ContextMenuForm();
+            
+            scrollPanel->MouseWheel += gcnew System::Windows::Forms::MouseEventHandler(this, &MyForm::scrollPanel_MouseWheel);
+            if (scrollPanel != nullptr)
+                scrollPanel->Scroll += gcnew ScrollEventHandler(this, &MyForm::ScrollPanel_Scroll);
+
+            else
+                MessageBox::Show("ScrollPanel is null!");
+
+            KeyDown += gcnew KeyEventHandler(this, &MyForm::Form_KeyDown);
+            canvas->SetCallback(gcnew CanvasControl::DataCallback(this, &MyForm::HandleData));
+            canvas->SetPointback(gcnew CanvasControl::PointCallback(this, &MyForm::HandlePointData));
+           
+        }
+        
+        private:
+        void MyForm_Resize(Object^ sender, EventArgs^ e)
+            {
+                if ((canvas->Width > 0)||(canvas->Height >0))
+                {
+                    // Get the current width and height of the form
+                    int currentWidth = this->Width;
+                    int currentHeight = this->Height;
+
+                    // Check if width or height has changed
+                    if (currentWidth != previousWidth)
+                    {
+                        canvas->SetScale(1.0);
+                        int formWidth = currentWidth - 65;
+                        float newScale = static_cast<float>(formWidth) / static_cast<float>(canvas->Width);
+                        canvas->SetScale(newScale);
+                        if (horizontalRuler != nullptr)
+                        {
+                            horizontalRuler->SetCanvasScale(newScale);
+                            horizontalRuler->SetCanvasScale(newScale);
+                            verticalRuler->SetCanvasScale(newScale);
+                        }
+                        else
+                        {
+                            MessageBox::Show("horizontalRuler is null. Unable to set scale.");
+                        }
+                    }
+
+                    if (currentHeight != previousHeight)
+                    {
+                        canvas->SetScale(1.0);
+                        int formHeight = currentHeight - 87;
+                        float newScale = static_cast<float>(formHeight) / static_cast<float>(canvas->Height);
+                        canvas->SetScale(newScale);
+                        horizontalRuler->SetCanvasScale(newScale);
+                        verticalRuler->SetCanvasScale(newScale);
+                    }
+                }
+                canvasContainerPanel->Size = System::Drawing::Size(this->Width + 10, this->Height + 40);
+            }
+
+        void HandleData(String^ data1, String^ data2)
+        {
+            ObjWidthTxtbox->Text = data1;
+            ObjHeightTxtbox->Text = data2;
+        }
+
+        void HandlePointData(float data1, float data2)
+        {
+            ObjXAxisTxtbox->Text = data1.ToString("0.000");
+            ObjYAxisTxtbox->Text = data2.ToString("0.000");
+           
+        }
+
+        void ToolPanelForm() {
+           
+            ToolPanel->BackColor = Color::FromArgb(150, 150, 150);
+            ToolPanel->Location = System::Drawing::Point(828, 613);
+            ToolPanel->Name = L"ToolS";
+            ToolPanel->Size = System::Drawing::Size(225, 90);
+
+            ToolControlPanel->BackColor = Color::FromArgb(150, 150, 150);
+            ToolControlPanel->Location = System::Drawing::Point(1055, 613);
+            ToolControlPanel->Name = L"ToolControlPanel";
+            ToolControlPanel->Size = System::Drawing::Size(270, 90);
+
+            Label^ PageSizeLbl = gcnew Label();
+            PageSizeLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            PageSizeLbl->ForeColor = System::Drawing::Color::Black;
+            PageSizeLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            PageSizeLbl->Location = System::Drawing::Point(5, 10);
+            PageSizeLbl->Name = L"PageSizeLbl";
+            PageSizeLbl->Size = System::Drawing::Size(50, 13);
+            PageSizeLbl->TabIndex = 143;
+            PageSizeLbl->Text = L"Page Size";
+
+
+            ObjHeightTxtbox->BackColor = System::Drawing::Color::White;
+            ObjHeightTxtbox->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            ObjHeightTxtbox->Font = (gcnew System::Drawing::Font(L"Tahoma", 8.25F));
+            ObjHeightTxtbox->ForeColor = System::Drawing::Color::Black;
+            ObjHeightTxtbox->Location = System::Drawing::Point(166, 66);
+            ObjHeightTxtbox->Name = L"ObjHeightTxtbox";
+            ObjHeightTxtbox->Size = System::Drawing::Size(50, 14);
+            ObjHeightTxtbox->TabIndex = 156;
+            ObjHeightTxtbox->Text = L"0";
+            ObjHeightTxtbox->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ ObjHeightLbl = gcnew Label();
+            ObjHeightLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            ObjHeightLbl->ForeColor = System::Drawing::Color::Black;
+            ObjHeightLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            ObjHeightLbl->Location = System::Drawing::Point(146, 68);
+            ObjHeightLbl->Name = L"ObjHeightLbl";
+            ObjHeightLbl->Size = System::Drawing::Size(19, 13);
+            ObjHeightLbl->TabIndex = 155;
+            ObjHeightLbl->Text = L"H :";
+
+
+            ObjYAxisTxtbox->BackColor = System::Drawing::Color::White;
+            ObjYAxisTxtbox->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            ObjYAxisTxtbox->Font = (gcnew System::Drawing::Font(L"Tahoma", 8.25F));
+            ObjYAxisTxtbox->ForeColor = System::Drawing::Color::Black;
+            ObjYAxisTxtbox->Location = System::Drawing::Point(93, 66);
+            ObjYAxisTxtbox->Name = L"ObjYAxisTxtbox";
+            ObjYAxisTxtbox->Size = System::Drawing::Size(50, 14);
+            ObjYAxisTxtbox->TabIndex = 154;
+            ObjYAxisTxtbox->Text = L"0";
+            ObjYAxisTxtbox->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ ObjYAxisLbl = gcnew Label();
+            ObjYAxisLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            ObjYAxisLbl->ForeColor = System::Drawing::Color::Black;
+            ObjYAxisLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            ObjYAxisLbl->Location = System::Drawing::Point(71, 68);
+            ObjYAxisLbl->Name = L"ObjYAxisLbl";
+            ObjYAxisLbl->Size = System::Drawing::Size(24, 13);
+            ObjYAxisLbl->TabIndex = 153;
+            ObjYAxisLbl->Text = L"Y :";
+
+
+            ObjWidthTxtbox->BackColor = System::Drawing::Color::White;
+            ObjWidthTxtbox->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            ObjWidthTxtbox->Font = (gcnew System::Drawing::Font(L"Tahoma", 8.25F));
+            ObjWidthTxtbox->ForeColor = System::Drawing::Color::Black;
+            ObjWidthTxtbox->Location = System::Drawing::Point(166, 46);
+            ObjWidthTxtbox->Name = L"ObjWidthTxtbox";
+            ObjWidthTxtbox->Size = System::Drawing::Size(50, 14);
+            ObjWidthTxtbox->TabIndex = 152;
+            ObjWidthTxtbox->Text = L"0.000";
+            ObjWidthTxtbox->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ ObjWidthLbl = gcnew Label();
+            ObjWidthLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            ObjWidthLbl->ForeColor = System::Drawing::Color::Black;
+            ObjWidthLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            ObjWidthLbl->Location = System::Drawing::Point(146, 48);
+            ObjWidthLbl->Name = L"ObjWidthLbl";
+            ObjWidthLbl->Size = System::Drawing::Size(20, 13);
+            ObjWidthLbl->TabIndex = 151;
+            ObjWidthLbl->Text = L"W :";
+
+
+            ObjXAxisTxtbox->BackColor = System::Drawing::Color::White;
+            ObjXAxisTxtbox->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            ObjXAxisTxtbox->Font = (gcnew System::Drawing::Font(L"Tahoma", 8.25F));
+            ObjXAxisTxtbox->ForeColor = System::Drawing::Color::Black;
+            ObjXAxisTxtbox->Location = System::Drawing::Point(93, 46);
+            ObjXAxisTxtbox->Name = L"ObjXAxisTxtbox";
+            ObjXAxisTxtbox->Size = System::Drawing::Size(50, 14);
+            ObjXAxisTxtbox->TabIndex = 150;
+            ObjXAxisTxtbox->Text = L"0.000";
+            ObjXAxisTxtbox->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ ObjXAxisLbl = gcnew Label();
+            ObjXAxisLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            ObjXAxisLbl->ForeColor = System::Drawing::Color::Black;
+            ObjXAxisLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            ObjXAxisLbl->Location = System::Drawing::Point(71, 48);
+            ObjXAxisLbl->Name = L"ObjXAxisLbl";
+            ObjXAxisLbl->Size = System::Drawing::Size(24, 13);
+            ObjXAxisLbl->TabIndex = 149;
+            ObjXAxisLbl->Text = L"X :";
+
+            Label^ ObjAxisLbl = gcnew Label();
+            ObjAxisLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            ObjAxisLbl->ForeColor = System::Drawing::Color::Black;
+            ObjAxisLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            ObjAxisLbl->Location = System::Drawing::Point(71, 31);
+            ObjAxisLbl->Name = L"ObjAxisLbl";
+            ObjAxisLbl->Size = System::Drawing::Size(50, 13);
+            ObjAxisLbl->TabIndex = 148;
+            ObjAxisLbl->Text = L"Object :";
+
+            CanvasHeightTxtbox->BackColor = System::Drawing::Color::White;
+            CanvasHeightTxtbox->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            CanvasHeightTxtbox->Font = (gcnew System::Drawing::Font(L"Tahoma", 8.25F));
+            CanvasHeightTxtbox->ForeColor = System::Drawing::Color::Black;
+            CanvasHeightTxtbox->Location = System::Drawing::Point(165, 8);
+            CanvasHeightTxtbox->Name = L"CanvasHeightTxtbox";
+            CanvasHeightTxtbox->Size = System::Drawing::Size(50, 14);
+            CanvasHeightTxtbox->TabIndex = 147;
+            if (nestPageHeightTxt->Text == "")
+            {
+                CanvasHeightTxtbox->Text = "0";
+            }
+            else
+            {
+                CanvasHeightTxtbox->Text = nestPageHeightTxt->Text;
+            }
+            CanvasHeightTxtbox->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ CanvasHeightLbl = gcnew Label();
+            CanvasHeightLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            CanvasHeightLbl->ForeColor = System::Drawing::Color::Black;
+            CanvasHeightLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            CanvasHeightLbl->Location = System::Drawing::Point(146, 10);
+            CanvasHeightLbl->Name = L"CanvasHeightLbl";
+            CanvasHeightLbl->Size = System::Drawing::Size(19, 13);
+            CanvasHeightLbl->TabIndex = 146;
+            CanvasHeightLbl->Text = L"H :";
+
+            CanvasWidthTxtbox->BackColor = System::Drawing::Color::White;
+            CanvasWidthTxtbox->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            CanvasWidthTxtbox->Font = (gcnew System::Drawing::Font(L"Tahoma", 8.25F));
+            CanvasWidthTxtbox->ForeColor = System::Drawing::Color::Black;
+            CanvasWidthTxtbox->Location = System::Drawing::Point(93, 8);
+            CanvasWidthTxtbox->Name = L"CanvasWidthTxtbox";
+            CanvasWidthTxtbox->Size = System::Drawing::Size(50, 14);
+            CanvasWidthTxtbox->TabIndex = 145;
+            if (nestPageHeightTxt->Text == "")
+            {
+                CanvasWidthTxtbox->Text = "0";
+            }
+            else
+            {
+                CanvasWidthTxtbox->Text = nestPageWidthTxt->Text;
+            }
+            CanvasWidthTxtbox->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ CanvasWidthLbl = gcnew Label();
+            CanvasWidthLbl->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            CanvasWidthLbl->ForeColor = System::Drawing::Color::Black;
+            CanvasWidthLbl->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            CanvasWidthLbl->Location = System::Drawing::Point(71, 10);
+            CanvasWidthLbl->Name = L"CanvasWidthLbl";
+            CanvasWidthLbl->Size = System::Drawing::Size(24, 13);
+            CanvasWidthLbl->TabIndex = 144;
+            CanvasWidthLbl->Text = L"W :";
+
+            RadioButton^ XYBR = gcnew RadioButton();
+            XYBR->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYBR->Location = System::Drawing::Point(44, 70);
+            XYBR->Name = L"XYBR";
+            XYBR->Size = System::Drawing::Size(11, 10);
+            XYBR->TabIndex = 164;
+            XYBR->TabStop = true;
+            XYBR->UseVisualStyleBackColor = true;
+            XYBR->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            RadioButton^ XYBM = gcnew RadioButton();
+            XYBM->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYBM->Location = System::Drawing::Point(27, 70);
+            XYBM->Name = L"XYBM";
+            XYBM->Size = System::Drawing::Size(11, 10);
+            XYBM->TabIndex = 163;
+            XYBM->TabStop = true;
+            XYBM->UseVisualStyleBackColor = true;
+            XYBM->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            RadioButton^ XYBL = gcnew RadioButton();
+            XYBL->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYBL->Location = System::Drawing::Point(10, 70);
+            XYBL->Name = L"XYBL";
+            XYBL->Size = System::Drawing::Size(11, 10);
+            XYBL->TabIndex = 162;
+            XYBL->TabStop = true;
+            XYBL->UseVisualStyleBackColor = true;
+            XYBL->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            RadioButton^ XYCR = gcnew RadioButton();
+            XYCR->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYCR->Location = System::Drawing::Point(44, 54);
+            XYCR->Name = L"XYCR";
+            XYCR->Size = System::Drawing::Size(11, 10);
+            XYCR->TabIndex = 161;
+            XYCR->TabStop = true;
+            XYCR->UseVisualStyleBackColor = true;
+            XYCR->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            RadioButton^ XYCM = gcnew RadioButton();
+            XYCM->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYCM->Location = System::Drawing::Point(27, 54);
+            XYCM->Name = L"XYCM";
+            XYCM->Size = System::Drawing::Size(11, 10);
+            XYCM->TabIndex = 161;
+            XYCM->TabStop = true;
+            XYCM->UseVisualStyleBackColor = true;
+            XYCM->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            RadioButton^ XYCL = gcnew RadioButton();
+            XYCL->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYCL->Location = System::Drawing::Point(10, 54);
+            XYCL->Name = L"XYCL";
+            XYCL->Size = System::Drawing::Size(11, 10);
+            XYCL->TabIndex = 160;
+            XYCL->TabStop = true;
+            XYCL->UseVisualStyleBackColor = true;
+            XYCL->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            RadioButton^ XYTR = gcnew RadioButton();
+            XYTR->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYTR->Location = System::Drawing::Point(44, 39);
+            XYTR->Name = L"XYTR";
+            XYTR->Size = System::Drawing::Size(11, 10);
+            XYTR->TabIndex = 159;
+            XYTR->TabStop = true;
+            XYTR->UseVisualStyleBackColor = true;
+            XYTR->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            RadioButton^ XYTM = gcnew RadioButton();
+            XYTM->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYTM->Location = System::Drawing::Point(27, 39);
+            XYTM->Name = L"XYTM";
+            XYTM->Size = System::Drawing::Size(11, 10);
+            XYTM->TabIndex = 158;
+            XYTM->TabStop = true;
+            XYTM->UseVisualStyleBackColor = true;
+            XYTM->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+
+            XYTL->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            XYTL->Location = System::Drawing::Point(10, 39);
+            XYTL->Name = L"XYTL";
+            XYTL->Size = System::Drawing::Size(11, 10);
+            XYTL->TabIndex = 157;
+            XYTL->TabStop = true;
+            XYTL->Checked = true;
+            XYTL->UseVisualStyleBackColor = true;
+            XYTL->Paint += gcnew System::Windows::Forms::PaintEventHandler(this, &MyForm::RadioButton_Paint);
+
+            ToolPanel->Controls->Add(PageSizeLbl);
+            ToolPanel->Controls->Add(ObjHeightTxtbox);
+            ToolPanel->Controls->Add(ObjHeightLbl);
+            ToolPanel->Controls->Add(ObjYAxisTxtbox);
+            ToolPanel->Controls->Add(ObjYAxisLbl);
+            ToolPanel->Controls->Add(ObjWidthTxtbox);
+            ToolPanel->Controls->Add(ObjWidthLbl);
+            ToolPanel->Controls->Add(ObjXAxisTxtbox);
+            ToolPanel->Controls->Add(ObjXAxisLbl);
+            ToolPanel->Controls->Add(ObjAxisLbl);
+            ToolPanel->Controls->Add(CanvasHeightTxtbox);
+            ToolPanel->Controls->Add(CanvasHeightLbl);
+            ToolPanel->Controls->Add(CanvasWidthTxtbox);
+            ToolPanel->Controls->Add(XYTL);
+            ToolPanel->Controls->Add(XYTM);
+            ToolPanel->Controls->Add(XYTR);
+            ToolPanel->Controls->Add(XYCL);
+            ToolPanel->Controls->Add(XYCM);
+            ToolPanel->Controls->Add(XYCR);
+            ToolPanel->Controls->Add(XYBL);
+            ToolPanel->Controls->Add(XYBM);
+            ToolPanel->Controls->Add(XYBR);
+            this->Controls->Add(ToolPanel);
+            ToolPanel->BringToFront();
+            ToolPanel->MouseDown += gcnew MouseEventHandler(this, &MyForm::ToolPanel_MouseDown);
+            ToolPanel->MouseMove += gcnew MouseEventHandler(this, &MyForm::ToolPanel_MouseMove);
+            ToolPanel->MouseUp += gcnew MouseEventHandler(this, &MyForm::ToolPanel_MouseUp);
+            
+            CanvasWidthTxtbox->KeyDown += gcnew KeyEventHandler(this, &MyForm::CanvasWidthTxtbox_KeyDown);
+            CanvasHeightTxtbox->KeyDown += gcnew KeyEventHandler(this, &MyForm::CanvasHeightTxtbox_KeyDown);
+
+            ObjXAxisTxtbox->KeyDown += gcnew KeyEventHandler(this, &MyForm::ObjXAxisTxtbox_KeyDown);
+            ObjYAxisTxtbox->KeyDown += gcnew KeyEventHandler(this, &MyForm::ObjYAxisTxtbox_KeyDown);
+           
+            ToolPanel->Visible = true;
+            
+        }
+
+        void ToolControlForm()
+        {
+            Label^ VerLbl1 = gcnew Label();
+            VerLbl1->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            VerLbl1->ForeColor = System::Drawing::Color::Black;
+            VerLbl1->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            VerLbl1->Location = System::Drawing::Point(187, 59);
+            VerLbl1->Name = L"VerLbl1";
+            VerLbl1->Size = System::Drawing::Size(19, 13);
+            VerLbl1->TabIndex = 160;
+            VerLbl1->Text = L"V";
+
+            TextBox^ VerTxtbox1 = gcnew TextBox();
+            VerTxtbox1->BackColor = System::Drawing::Color::White;
+            VerTxtbox1->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            VerTxtbox1->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            VerTxtbox1->ForeColor = System::Drawing::Color::Black;
+            VerTxtbox1->Location = System::Drawing::Point(181, 73);
+            VerTxtbox1->Multiline = true;
+            VerTxtbox1->Name = L"VerTxtbox1";
+            VerTxtbox1->Size = System::Drawing::Size(23, 11);
+            VerTxtbox1->TabIndex = 159;
+            VerTxtbox1->Text = L"000";
+            VerTxtbox1->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ HorLbl1 = gcnew Label();
+            HorLbl1->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            HorLbl1->ForeColor = System::Drawing::Color::Black;
+            HorLbl1->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            HorLbl1->Location = System::Drawing::Point(186, 33);
+            HorLbl1->Name = L"HorLbl1";
+            HorLbl1->Size = System::Drawing::Size(19, 13);
+            HorLbl1->TabIndex = 158;
+            HorLbl1->Text = L"H";
+
+            TextBox^ HorTxtbox1 = gcnew TextBox();
+            HorTxtbox1->BackColor = System::Drawing::Color::White;
+            HorTxtbox1->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            HorTxtbox1->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            HorTxtbox1->ForeColor = System::Drawing::Color::Black;
+            HorTxtbox1->Location = System::Drawing::Point(181, 47);
+            HorTxtbox1->Multiline = true;
+            HorTxtbox1->Name = L"HorTxtbox1";
+            HorTxtbox1->Size = System::Drawing::Size(23, 11);
+            HorTxtbox1->TabIndex = 157;
+            HorTxtbox1->Text = L"000";
+            HorTxtbox1->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ VerLbl3 = gcnew Label();
+            VerLbl3->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            VerLbl3->ForeColor = System::Drawing::Color::Black;
+            VerLbl3->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            VerLbl3->Location = System::Drawing::Point(72, 59);
+            VerLbl3->Name = L"VerLbl3";
+            VerLbl3->Size = System::Drawing::Size(19, 13);
+            VerLbl3->TabIndex = 152;
+            VerLbl3->Text = L"V";
+
+            TextBox^ VerTxtbox3 = gcnew TextBox();
+            VerTxtbox3->BackColor = System::Drawing::Color::White;
+            VerTxtbox3->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            VerTxtbox3->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            VerTxtbox3->ForeColor = System::Drawing::Color::Black;
+            VerTxtbox3->Location = System::Drawing::Point(66, 73);
+            VerTxtbox3->Multiline = true;
+            VerTxtbox3->Name = L"VerTxtbox3";
+            VerTxtbox3->Size = System::Drawing::Size(23, 11);
+            VerTxtbox3->TabIndex = 151;
+            VerTxtbox3->Text = L"000";
+            VerTxtbox3->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            Label^ HorLbl3 = gcnew Label();
+            HorLbl3->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            HorLbl3->ForeColor = System::Drawing::Color::Black;
+            HorLbl3->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            HorLbl3->Location = System::Drawing::Point(72, 33);
+            HorLbl3->Name = L"HorLbl3";
+            HorLbl3->Size = System::Drawing::Size(19, 13);
+            HorLbl3->TabIndex = 142;
+            HorLbl3->Text = L"H";
+
+            TextBox^ HorTxtbox3 = gcnew TextBox();
+            HorTxtbox3->BackColor = System::Drawing::Color::White;
+            HorTxtbox3->BorderStyle = System::Windows::Forms::BorderStyle::None;
+            HorTxtbox3->Font = (gcnew System::Drawing::Font(L"Tahoma", 7));
+            HorTxtbox3->ForeColor = System::Drawing::Color::Black;
+            HorTxtbox3->Location = System::Drawing::Point(66, 47);
+            HorTxtbox3->Multiline = true;
+            HorTxtbox3->Name = L"HorTxtbox3";
+            HorTxtbox3->Size = System::Drawing::Size(23, 11);
+            HorTxtbox3->TabIndex = 141;
+            HorTxtbox3->Text = L"000";
+            HorTxtbox3->TextAlign = System::Windows::Forms::HorizontalAlignment::Center;
+
+            PictureBox^ AutoNesting = gcnew PictureBox();
+            AutoNesting->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AutoNesting->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ image = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\ANest.png");
+            AutoNesting->Image = image;
+            AutoNesting->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AutoNesting->Location = System::Drawing::Point(93, 33);
+            AutoNesting->Name = L"AutoNesting";
+            AutoNesting->Size = System::Drawing::Size(55, 53);
+            AutoNesting->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AutoNesting->TabIndex = 17;
+            AutoNesting->TabStop = false;
+            ToolTip^ AutoNestingTip = gcnew ToolTip();
+            AutoNestingTip->SetToolTip(AutoNesting, "Auto Nesting");
+
+            PictureBox^ VerticalGap = gcnew PictureBox();
+            VerticalGap->Anchor = System::Windows::Forms::AnchorStyles::None;
+            VerticalGap->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ VerticalGapimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\GapV.png");
+            VerticalGap->Image = VerticalGapimage;
+            VerticalGap->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            VerticalGap->Location = System::Drawing::Point(35, 60);
+            VerticalGap->Name = L"VerticalGap";
+            VerticalGap->Size = System::Drawing::Size(26, 26);
+            VerticalGap->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            VerticalGap->TabIndex = 16;
+            VerticalGap->TabStop = false;
+            ToolTip^ VerticalGapTip = gcnew ToolTip();
+            VerticalGapTip->SetToolTip(VerticalGap, "Vertical Gap");
+
+            PictureBox^ HorizontalGap = gcnew PictureBox();
+            HorizontalGap->Anchor = System::Windows::Forms::AnchorStyles::None;
+            HorizontalGap->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ HorizontalGapimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\GapH.png");
+            HorizontalGap->Image = HorizontalGapimage;
+            HorizontalGap->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            HorizontalGap->Location = System::Drawing::Point(35, 33);
+            HorizontalGap->Name = L"HorizontalGap";
+            HorizontalGap->Size = System::Drawing::Size(26, 26);
+            HorizontalGap->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            HorizontalGap->TabIndex = 15;
+            HorizontalGap->TabStop = false;
+            ToolTip^ HorizontalGapTip = gcnew ToolTip();
+            HorizontalGapTip->SetToolTip(HorizontalGap, "Horizontal Gap");
+
+            PictureBox^ AddOutlineSolid = gcnew PictureBox();
+            AddOutlineSolid->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AddOutlineSolid->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ AddOutlineSolidimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\OutlineS.png");
+            AddOutlineSolid->Image = AddOutlineSolidimage;
+            AddOutlineSolid->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AddOutlineSolid->Location = System::Drawing::Point(151, 60);
+            AddOutlineSolid->Name = L"AddOutlineSolid";
+            AddOutlineSolid->Size = System::Drawing::Size(26, 26);
+            AddOutlineSolid->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AddOutlineSolid->TabIndex = 14;
+            AddOutlineSolid->TabStop = false;
+            ToolTip^ AddOutlineSolidTip = gcnew ToolTip();
+            AddOutlineSolidTip->SetToolTip(AddOutlineSolid, "Add Outline Solid");
+
+            PictureBox^ AddOutLineDash = gcnew PictureBox();
+            AddOutLineDash->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AddOutLineDash->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            AddOutLineDash->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            System::Drawing::Image^ AddOutLineDashimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\OutlineD.png");
+            AddOutLineDash->Image = AddOutLineDashimage;
+            AddOutLineDash->Location = System::Drawing::Point(151, 33);
+            AddOutLineDash->Name = L"AddOutLineDash";
+            AddOutLineDash->Size = System::Drawing::Size(26, 26);
+            AddOutLineDash->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AddOutLineDash->TabIndex = 13;
+            AddOutLineDash->TabStop = false;
+            ToolTip^ AddOutlineDashTip = gcnew ToolTip();
+            AddOutlineDashTip->SetToolTip(AddOutLineDash, "Add Outline Dash");
+
+
+            PictureBox^ RightRotate = gcnew PictureBox();
+            RightRotate->Anchor = System::Windows::Forms::AnchorStyles::None;
+            RightRotate->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ RightRotateimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\RotateR.png");
+            RightRotate->Image = RightRotateimage;
+            RightRotate->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            RightRotate->Location = System::Drawing::Point(238, 60);
+            RightRotate->Name = L"RightRotate";
+            RightRotate->Size = System::Drawing::Size(26, 26);
+            RightRotate->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            RightRotate->TabIndex = 12;
+            RightRotate->TabStop = false;
+            ToolTip^ RightRotateTip = gcnew ToolTip();
+            RightRotateTip->SetToolTip(RightRotate, "Right Rotate");
+
+            PictureBox^ LeftRotate = gcnew PictureBox();
+            LeftRotate->Anchor = System::Windows::Forms::AnchorStyles::None;
+            LeftRotate->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ LeftRotateimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\RotateL.png");
+            LeftRotate->Image = LeftRotateimage;
+            LeftRotate->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            LeftRotate->Location = System::Drawing::Point(209, 60);
+            LeftRotate->Name = L"LeftRotate";
+            LeftRotate->Size = System::Drawing::Size(26, 26);
+            LeftRotate->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            LeftRotate->TabIndex = 11;
+            LeftRotate->TabStop = false;
+            ToolTip^ LeftRotateTip = gcnew ToolTip();
+            LeftRotateTip->SetToolTip(LeftRotate, "Left Rotate");
+
+            PictureBox^ HorizontalFlip = gcnew PictureBox();
+            HorizontalFlip->Anchor = System::Windows::Forms::AnchorStyles::None;
+            HorizontalFlip->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ HorizontalFlipimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\HFlip.png");
+            HorizontalFlip->Image = HorizontalFlipimage;
+            HorizontalFlip->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            HorizontalFlip->Location = System::Drawing::Point(238, 33);
+            HorizontalFlip->Name = L"HorizontalFlip";
+            HorizontalFlip->Size = System::Drawing::Size(26, 26);
+            HorizontalFlip->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            HorizontalFlip->TabIndex = 10;
+            HorizontalFlip->TabStop = false;
+            ToolTip^ HorizontalFlipTip = gcnew ToolTip();
+            HorizontalFlipTip->SetToolTip(HorizontalFlip, "Horizontal Flip");
+
+            PictureBox^ VerticalFlip = gcnew PictureBox();
+            VerticalFlip->Anchor = System::Windows::Forms::AnchorStyles::None;
+            VerticalFlip->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ VerticalFlipimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\FlipV.png");
+            VerticalFlip->Image = VerticalFlipimage;
+            VerticalFlip->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            VerticalFlip->Location = System::Drawing::Point(209, 33);
+            VerticalFlip->Name = L"VerticalFlip";
+            VerticalFlip->Size = System::Drawing::Size(26, 26);
+            VerticalFlip->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            VerticalFlip->TabIndex = 9;
+            VerticalFlip->TabStop = false;
+            ToolTip^ VerticalFlipTip = gcnew ToolTip();
+            VerticalFlipTip->SetToolTip(VerticalFlip, "Vertical Flip");
+
+            PictureBox^ CropSelectionBtn = gcnew PictureBox();
+            CropSelectionBtn->Anchor = System::Windows::Forms::AnchorStyles::None;
+            CropSelectionBtn->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ CropSelectionBtnimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\Select.png");
+            CropSelectionBtn->Image = CropSelectionBtnimage;
+            CropSelectionBtn->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            CropSelectionBtn->Location = System::Drawing::Point(238, 5);
+            CropSelectionBtn->Name = L"CropSelectionBtn";
+            CropSelectionBtn->Size = System::Drawing::Size(26, 26);
+            CropSelectionBtn->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            CropSelectionBtn->TabIndex = 8;
+            CropSelectionBtn->TabStop = false;
+            ToolTip^ CropSelectionBtnTip = gcnew ToolTip();
+            CropSelectionBtnTip->SetToolTip(CropSelectionBtn, "Crop Selection");
+
+            PictureBox^ SutoPageCut = gcnew PictureBox();
+            SutoPageCut->Anchor = System::Windows::Forms::AnchorStyles::None;
+            SutoPageCut->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ SutoPageCutimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\PgCut.png");
+            SutoPageCut->Image = SutoPageCutimage;
+            SutoPageCut->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            SutoPageCut->Location = System::Drawing::Point(209, 5);
+            SutoPageCut->Name = L"SutoPageCut";
+            SutoPageCut->Size = System::Drawing::Size(26, 26);
+            SutoPageCut->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            SutoPageCut->TabIndex = 7;
+            SutoPageCut->TabStop = false;
+            ToolTip^ SutoPageCutTip = gcnew ToolTip();
+            SutoPageCutTip->SetToolTip(SutoPageCut, "Auto PageCut");
+
+            PictureBox^ AlignB = gcnew PictureBox();
+            AlignB->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AlignB->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ AlignBimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\AlignB.png");
+            AlignB->Image = AlignBimage;
+            AlignB->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AlignB->Location = System::Drawing::Point(180, 5);
+            AlignB->Name = L"AlignB";
+            AlignB->Size = System::Drawing::Size(26, 26);
+            AlignB->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AlignB->TabIndex = 6;
+            AlignB->TabStop = false;
+            ToolTip^ AlignBTip = gcnew ToolTip();
+            AlignBTip->SetToolTip(AlignB, "Align Bottom");
+
+            PictureBox^ AlignCtr = gcnew PictureBox();
+            AlignCtr->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AlignCtr->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ AlignCtrimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\AlignCtr.png");
+            AlignCtr->Image = AlignCtrimage;
+            AlignCtr->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AlignCtr->Location = System::Drawing::Point(151, 5);
+            AlignCtr->Name = L"AlignCtr";
+            AlignCtr->Size = System::Drawing::Size(26, 26);
+            AlignCtr->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AlignCtr->TabIndex = 5;
+            AlignCtr->TabStop = false;
+            ToolTip^ AlignCtrTip = gcnew ToolTip();
+            AlignCtrTip->SetToolTip(AlignCtr, "Align Centre");
+
+            PictureBox^ AlignM = gcnew PictureBox();
+            AlignM->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AlignM->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ AlignMimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\AlignT.png");
+            AlignM->Image = AlignMimage;
+            AlignM->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AlignM->Location = System::Drawing::Point(122, 5);
+            AlignM->Name = L"AlignC";
+            AlignM->Size = System::Drawing::Size(26, 26);
+            AlignM->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AlignM->TabIndex = 4;
+            AlignM->TabStop = false;
+            ToolTip^ AlignMTip = gcnew ToolTip();
+            AlignMTip->SetToolTip(AlignM, "Align Middle");
+
+            PictureBox^ AlignR = gcnew PictureBox();
+            AlignR->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AlignR->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ AlignRimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\AlignR.png");
+            AlignR->Image = AlignRimage;
+            AlignR->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AlignR->Location = System::Drawing::Point(93, 5);
+            AlignR->Name = L"AlignR";
+            AlignR->Size = System::Drawing::Size(26, 26);
+            AlignR->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AlignR->TabIndex = 3;
+            AlignR->TabStop = false;
+            ToolTip^ AlignRTip = gcnew ToolTip();
+            AlignRTip->SetToolTip(AlignR, "Align Right");
+
+            PictureBox^ AlignC = gcnew PictureBox();
+            AlignC->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AlignC->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ AlignCimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\AlignC.png");
+            AlignC->Image = AlignCimage;
+            AlignC->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AlignC->Location = System::Drawing::Point(64, 5);
+            AlignC->Name = L"AlignC";
+            AlignC->Size = System::Drawing::Size(26, 26);
+            AlignC->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AlignC->TabIndex = 2;
+            AlignC->TabStop = false;
+            ToolTip^ AlignCTip = gcnew ToolTip();
+            AlignCTip->SetToolTip(AlignC, "Align Centre");
+
+            PictureBox^ AlignL = gcnew PictureBox();
+            AlignL->Anchor = System::Windows::Forms::AnchorStyles::None;
+            AlignL->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ AlignLimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\AlignL.png");
+            AlignL->Image = AlignLimage;
+            AlignL->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            AlignL->Location = System::Drawing::Point(35, 5);
+            AlignL->Name = L"AlignL";
+            AlignL->Size = System::Drawing::Size(26, 26);
+            AlignL->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            AlignL->TabIndex = 1;
+            AlignL->TabStop = false;
+            ToolTip^ AlignLTip = gcnew ToolTip();
+            AlignLTip->SetToolTip(AlignL, "Align Left");
+
+            PictureBox^ SelectAllBtn = gcnew PictureBox();
+            SelectAllBtn->Anchor = System::Windows::Forms::AnchorStyles::None;
+            SelectAllBtn->BackColor = System::Drawing::Color::FromArgb(static_cast<System::Int32>(static_cast<System::Byte>(100)), static_cast<System::Int32>(static_cast<System::Byte>(100)),
+                static_cast<System::Int32>(static_cast<System::Byte>(100)));
+            System::Drawing::Image^ SelectAllBtnimage = System::Drawing::Image::FromFile("C:\\BboxRIP\\Ico\\SelectAll.png");
+            SelectAllBtn->Image = SelectAllBtnimage;
+            SelectAllBtn->ImeMode = System::Windows::Forms::ImeMode::NoControl;
+            SelectAllBtn->Location = System::Drawing::Point(6, 5);
+            SelectAllBtn->Name = L"SelectAllBtn";
+            SelectAllBtn->Size = System::Drawing::Size(26, 26);
+            SelectAllBtn->SizeMode = System::Windows::Forms::PictureBoxSizeMode::Zoom;
+            SelectAllBtn->TabIndex = 0;
+            SelectAllBtn->TabStop = false;
+            ToolTip^ SelectAllBtnTip = gcnew ToolTip();
+            SelectAllBtnTip->SetToolTip(SelectAllBtn, "Select All");
+
+            ToolControlPanel->Controls->Add(VerLbl1);
+            ToolControlPanel->Controls->Add(VerLbl3);
+            ToolControlPanel->Controls->Add(HorLbl1);
+            ToolControlPanel->Controls->Add(HorLbl3);
+            ToolControlPanel->Controls->Add(VerTxtbox1);
+            ToolControlPanel->Controls->Add(VerTxtbox3);
+            ToolControlPanel->Controls->Add(HorTxtbox1);
+            ToolControlPanel->Controls->Add(HorTxtbox3);
+            ToolControlPanel->Controls->Add(SelectAllBtn);
+            ToolControlPanel->Controls->Add(AutoNesting);
+            ToolControlPanel->Controls->Add(VerticalGap);
+            ToolControlPanel->Controls->Add(HorizontalGap);
+            ToolControlPanel->Controls->Add(AddOutlineSolid);
+            ToolControlPanel->Controls->Add(AddOutLineDash);
+            ToolControlPanel->Controls->Add(RightRotate);
+            ToolControlPanel->Controls->Add(LeftRotate);
+            ToolControlPanel->Controls->Add(VerticalFlip);
+            ToolControlPanel->Controls->Add(HorizontalFlip);
+            ToolControlPanel->Controls->Add(CropSelectionBtn);
+            ToolControlPanel->Controls->Add(SutoPageCut);
+            ToolControlPanel->Controls->Add(AlignB);
+            ToolControlPanel->Controls->Add(AlignCtr);
+            ToolControlPanel->Controls->Add(AlignM);
+            ToolControlPanel->Controls->Add(AlignR);
+            ToolControlPanel->Controls->Add(AlignC);
+            ToolControlPanel->Controls->Add(AlignL);
+           
+            this->Controls->Add(ToolControlPanel);
+            ToolControlPanel->BringToFront();
+            ToolControlPanel->Visible = true;
+
+            ToolControlPanel->MouseDown += gcnew MouseEventHandler(this, &MyForm::ToolControlPanel_MouseDown);
+            ToolControlPanel->MouseMove += gcnew MouseEventHandler(this, &MyForm::ToolControlPanel_MouseMove);
+            ToolControlPanel->MouseUp += gcnew MouseEventHandler(this, &MyForm::ToolControlPanel_MouseUp);
+            AutoNesting->Click += gcnew EventHandler(this, &MyForm::AutoNestMenuItem_Click);
+            AlignL->Click += gcnew System::EventHandler(this, &MyForm::AlignL_Click);
+            AlignC->Click += gcnew System::EventHandler(this, &MyForm::AlignC_Click);
+            AlignR->Click += gcnew System::EventHandler(this, &MyForm::AlignR_Click);
+            AlignM->Click += gcnew System::EventHandler(this, &MyForm::AlignM_Click);
+            AlignCtr->Click += gcnew System::EventHandler(this, &MyForm::AlignCtr_Click);
+            AlignB->Click += gcnew System::EventHandler(this, &MyForm::AlignB_Click);
+        }
+
+        void NewNestingForm()
+        {
+            newForm->Size = Drawing::Size(345, 220);
+            newForm->BackColor = Color::FromArgb(150, 150, 150);
+            newForm->Font = gcnew System::Drawing::Font("Tahoma", 9.75f);
+            newForm->FormBorderStyle = System::Windows::Forms::FormBorderStyle::None;
+            newForm->StartPosition = FormStartPosition::CenterParent;
+
+            Label^ newNestJobLbl = gcnew Label();
+            newNestJobLbl->AutoSize = true;
+            newNestJobLbl->Location = System::Drawing::Point(14, 19);
+            newNestJobLbl->Name = L"NewNestJobLbl";
+            newNestJobLbl->Text = L"New Nest Job";
+
+            Label^ nameLbl = gcnew Label();
+            nameLbl->AutoSize = true;
+            nameLbl->Location = System::Drawing::Point(24, 50); // Shifted to the left by 10 points
+            nameLbl->Name = L"NameLbl";
+            nameLbl->Text = L"Name   :";
+
+            nameTxtbox->ReadOnly = true;
+            nameTxtbox->Location = System::Drawing::Point(87, 47); // Shifted to the left by 10 points
+            nameTxtbox->Name = L"NameTxtbox";
+            nameTxtbox->Size = System::Drawing::Size(231, 23);
+
+            Label^ sizeLbl = gcnew Label();
+            sizeLbl->AutoSize = true;
+            sizeLbl->Location = System::Drawing::Point(24, 82); // Shifted to the left by 10 points
+            sizeLbl->Name = L"SizeLbl";
+            sizeLbl->Text = L"Size     :";
+
+            nestPageWidthTxt->Location = System::Drawing::Point(87, 79); // Shifted to the left by 10 points
+            nestPageWidthTxt->Name = L"NestPageWidthTxt";
+            nestPageWidthTxt->Size = System::Drawing::Size(67, 23);
+            nestPageWidthTxt->Text = "0";
+
+            nestPageHeightTxt->Location = System::Drawing::Point(220, 79); // Shifted to the left by 10 points
+            nestPageHeightTxt->Name = L"NestPageHeightTxt";
+            nestPageHeightTxt->Size = System::Drawing::Size(67, 23);
+            nestPageHeightTxt->Text = "0";
+
+            Label^ label4 = gcnew Label();
+            label4->AutoSize = true;
+            label4->Location = System::Drawing::Point(156, 86); // Shifted to the left by 10 points
+            label4->Name = L"label4";
+            label4->Text = L"mm";
+
+            Label^ label5 = gcnew Label();
+            label5->AutoSize = true;
+            label5->Location = System::Drawing::Point(289, 86); // Shifted to the left by 10 points
+            label5->Name = L"label5";
+            label5->Text = L"mm";
+
+            Label^ label6 = gcnew Label();
+            label6->AutoSize = true;
+            label6->Font = (gcnew System::Drawing::Font(L"Tahoma", 10.75F));
+            label6->Location = System::Drawing::Point(191, 82); // Shifted to the left by 10 points
+            label6->Name = L"label6";
+            label6->Text = L"X";
+
+
+            colorModeComboBox->FormattingEnabled = true;
+            colorModeComboBox->Items->AddRange(gcnew cli::array<System::Object^>(3) { L"Gray", L"RGB", L"CMYK" });
+            colorModeComboBox->Location = System::Drawing::Point(87, 111); // Shifted to the left by 10 points
+            colorModeComboBox->Name = L"ColorModeComboBox";
+            colorModeComboBox->Size = System::Drawing::Size(98, 24);
+            colorModeComboBox->Text = L"CMYK";
+
+            Label^ colorLbl = gcnew Label();
+            colorLbl->AutoSize = true;
+            colorLbl->Location = System::Drawing::Point(24, 114); // Shifted to the left by 10 points
+            colorLbl->Name = L"ColorLbl";
+            colorLbl->Text = L"Color    :";
+
+            Label^ iccLbl = gcnew Label();
+            iccLbl->AutoSize = true;
+            iccLbl->Location = System::Drawing::Point(24, 146); // Shifted to the left by 10 points
+            iccLbl->Name = L"ICCLbl";
+            iccLbl->Text = L"ICC      :";
+
+            iccComboBox->FormattingEnabled = true;
+            iccComboBox->Location = System::Drawing::Point(87, 143); // Shifted to the left by 10 points
+            iccComboBox->Name = L"IccComboBox";
+            iccComboBox->Size = System::Drawing::Size(231, 24);
+            iccComboBox->Text = "CoatedFOGRA39.icc";
+
+            Button^ cancelBtn = gcnew Button();
+            cancelBtn->Location = System::Drawing::Point(159, 183); // Shifted to the left by 10 points
+            cancelBtn->Name = L"CancelBtn";
+            cancelBtn->Size = System::Drawing::Size(75, 23);
+            cancelBtn->Text = L"Cancel";
+            cancelBtn->UseVisualStyleBackColor = true;
+
+            Button^ createBtn = gcnew Button();
+            createBtn->Location = System::Drawing::Point(243, 183); // Shifted to the left by 10 points
+            createBtn->Name = L"CreateBtn";
+            createBtn->Size = System::Drawing::Size(75, 23);
+            createBtn->Text = L"Create";
+            createBtn->UseVisualStyleBackColor = true;
+
+            Label^ DPILbl = gcnew Label();
+            DPILbl->AutoSize = true;
+            DPILbl->Location = System::Drawing::Point(191, 114); // Shifted to the left by 10 points
+            DPILbl->Name = L"DPILbl";
+            DPILbl->Size = System::Drawing::Size(26, 16);
+            DPILbl->TabIndex = 15;
+            DPILbl->Text = L"DPI";
+
+            ComboBox^ DPIComboBox = gcnew ComboBox();
+            DPIComboBox->Location = System::Drawing::Point(220, 111); // Shifted to the left by 10 points
+            DPIComboBox->Name = L"DPIComboBox";
+            DPIComboBox->Size = System::Drawing::Size(98, 23);
+            DPIComboBox->TabIndex = 16;
+
+            // Add DPI options to the ComboBox
+            DPIComboBox->Items->Add("50");
+            DPIComboBox->Items->Add("72");
+            DPIComboBox->Items->Add("96");
+            DPIComboBox->Items->Add("120");
+            DPIComboBox->Items->Add("150");
+            DPIComboBox->Items->Add("200");
+            DPIComboBox->Items->Add("250");
+            DPIComboBox->Items->Add("300");
+            DPIComboBox->Items->Add("360");
+            DPIComboBox->Items->Add("600");
+            DPIComboBox->Items->Add("720");
+
+
+            // Set default DPI selection
+            DPIComboBox->SelectedIndex = 2; // Default to 96 DPI
+
+            newForm->AcceptButton = createBtn;
+            newForm->CancelButton = cancelBtn;
+            newForm->Controls->Add(newNestJobLbl);
+            newForm->Controls->Add(nameLbl);
+            newForm->Controls->Add(nameTxtbox);
+            newForm->Controls->Add(sizeLbl);
+            newForm->Controls->Add(nestPageWidthTxt);
+            newForm->Controls->Add(nestPageHeightTxt);
+            newForm->Controls->Add(label4);
+            newForm->Controls->Add(label5);
+            newForm->Controls->Add(label6);
+            newForm->Controls->Add(colorModeComboBox);
+            newForm->Controls->Add(colorLbl);
+            newForm->Controls->Add(iccLbl);
+            newForm->Controls->Add(iccComboBox);
+            newForm->Controls->Add(cancelBtn);
+            newForm->Controls->Add(createBtn);
+            newForm->Controls->Add(DPIComboBox);
+            newForm->Controls->Add(DPILbl);
+            newForm->Shown += gcnew EventHandler(this, &MyForm::NewForm_Shown);
+            createBtn->Click += gcnew EventHandler(this, &MyForm::CreateBtn_Click);
+            cancelBtn->Click += gcnew EventHandler(this, &MyForm::CancelBtn_Click);
+            colorModeComboBox->SelectedIndexChanged += gcnew EventHandler(this, &MyForm::colorModeComboBox_SelectedIndexChanged);
+            String^ folderPath = "D:\\BboxCMS\\Nesting"; // Change this to your folder path
+            int folderCount = CountFolders(folderPath);
+
+            if (folderCount >= 0)
+            {
+                Console::WriteLine("Number of folders in the specified location: " + folderCount);
+                nameTxtbox->Text = "Nest_" + (folderCount + 1).ToString("D4");;
+            }
+            else
+            {
+                Console::WriteLine("Failed to count folders.");
+            }
+            System::IO::FileSystemWatcher^ watcherRGB = gcnew System::IO::FileSystemWatcher();
+            watcherRGB->Path = "D:\\BboxCMS\\CMS\\RGB";
+            watcherRGB->IncludeSubdirectories = true;
+            watcherRGB->NotifyFilter = static_cast<System::IO::NotifyFilters>(System::IO::NotifyFilters::FileName | System::IO::NotifyFilters::LastWrite);
+            watcherRGB->Changed += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherRGB->Created += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherRGB->Deleted += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherRGB->Renamed += gcnew System::IO::RenamedEventHandler(this, &MyForm::OnFileSystemRenamed);
+            watcherRGB->EnableRaisingEvents = true;
+
+            // Watcher for CMYK folder
+            System::IO::FileSystemWatcher^ watcherCMYK = gcnew System::IO::FileSystemWatcher();
+            watcherCMYK->Path = "D:\\BboxCMS\\CMS\\CMYK";
+            watcherCMYK->IncludeSubdirectories = true;
+            watcherCMYK->NotifyFilter = static_cast<System::IO::NotifyFilters>(System::IO::NotifyFilters::FileName | System::IO::NotifyFilters::LastWrite);
+            watcherCMYK->Changed += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherCMYK->Created += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherCMYK->Deleted += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherCMYK->Renamed += gcnew System::IO::RenamedEventHandler(this, &MyForm::OnFileSystemRenamed);
+            watcherCMYK->EnableRaisingEvents = true;
+
+            // Watcher for Gray folder
+            System::IO::FileSystemWatcher^ watcherGray = gcnew System::IO::FileSystemWatcher();
+            watcherGray->Path = "D:\\BboxCMS\\CMS\\Gray";
+            watcherGray->IncludeSubdirectories = true;
+            watcherGray->NotifyFilter = static_cast<System::IO::NotifyFilters>(System::IO::NotifyFilters::FileName | System::IO::NotifyFilters::LastWrite);
+            watcherGray->Changed += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherGray->Created += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherGray->Deleted += gcnew System::IO::FileSystemEventHandler(this, &MyForm::OnFileSystemChange);
+            watcherGray->Renamed += gcnew System::IO::RenamedEventHandler(this, &MyForm::OnFileSystemRenamed);
+            watcherGray->EnableRaisingEvents = true;
+            array<String^>^ folders = gcnew array<String^> {"D:\\BboxCMS\\CMS\\CMYK"};
+            UpdateICCComboBox(folders, iccComboBox);
+            newForm->MouseDown += gcnew MouseEventHandler(this, &MyForm::NewForm_MouseDown);
+            newForm->MouseMove += gcnew MouseEventHandler(this, &MyForm::NewForm_MouseMove);
+            newForm->MouseUp += gcnew MouseEventHandler(this, &MyForm::NewForm_MouseUp);
+        }
+
+        void ContextMenuForm() {
+            ToolStripMenuItem^ newNestingMenuItem = gcnew ToolStripMenuItem("New Nesting");
+            auto OpenMenuItem = gcnew ToolStripMenuItem("Open");
+            auto ImportMenuItem = gcnew ToolStripMenuItem("Import Image");
+            auto saveMenuItem = gcnew ToolStripMenuItem("Save");
+            auto clearMenuItem = gcnew ToolStripMenuItem("Clear");
+            auto exportMenuItem = gcnew ToolStripMenuItem("Export");
+            auto ExportOutLineMenuItem = gcnew ToolStripMenuItem("Export OutLine");
+            ToolsMenuItem->CheckOnClick = true;
+            ToolsMenuItem->Checked = true;
+            auto SetupMenuItem = gcnew ToolStripMenuItem("Setup");
+            auto UndoMenuItem = gcnew ToolStripMenuItem("Undo");
+            auto RedoMenuItem = gcnew ToolStripMenuItem("Redo");
+            auto CopyMenuItem = gcnew ToolStripMenuItem("Copy");
+            auto PasteMenuItem = gcnew ToolStripMenuItem("Paste");
+            auto MulPasteMenuItem = gcnew ToolStripMenuItem("Multi Paste");
+            auto CropMenuItem = gcnew ToolStripMenuItem("Crop");
+            auto DeleteMenuItem = gcnew ToolStripMenuItem("Delete");
+            auto fitToHeightMenuItem = gcnew ToolStripMenuItem("Fit to Height");
+            auto fitToWidthMenuItem = gcnew ToolStripMenuItem("Fit to Width");
+            auto RemoveMenuItem = gcnew ToolStripMenuItem("Remove Outline");
+            auto GroupMenuItem = gcnew ToolStripMenuItem("Group");
+            auto UngroupMenuItem = gcnew ToolStripMenuItem("Ungroup");
+            auto AutoNestMenuItem = gcnew ToolStripMenuItem("Auto Nest");
+            auto NormalViewMenuItem = gcnew ToolStripMenuItem("Normal View");
+            auto RotateMenuItem = gcnew ToolStripMenuItem("Rotate");
+            auto rotate0MenuItem = gcnew ToolStripMenuItem("0'");
+            auto rotate90MenuItem = gcnew ToolStripMenuItem("90'");
+            auto rotate180MenuItem = gcnew ToolStripMenuItem("180'");
+            auto rotate270MenuItem = gcnew ToolStripMenuItem("270'");
+            auto ReflectXMenuItem = gcnew ToolStripMenuItem("Reflect X");
+            auto ReflectYMenuItem = gcnew ToolStripMenuItem("Reflect Y");
+            auto ReflectItem = gcnew ToolStripMenuItem("Reflect");
+            auto BringToFrontMenuItem = gcnew ToolStripMenuItem("Bring to Front");
+            auto SendToBackMenuItem = gcnew ToolStripMenuItem("Send to Back");
+            auto PropertyMenuItem = gcnew ToolStripMenuItem("Property");
+            ReflectItem->DropDownItems->Add(ReflectXMenuItem);
+            ReflectItem->DropDownItems->Add(ReflectYMenuItem);
+
+
+            // Add click event handlers
+            newNestingMenuItem->Click += gcnew EventHandler(this, &MyForm::NewNestingMenuItem_Click);
+            OpenMenuItem->Click += gcnew EventHandler(this, &MyForm::OpenMenuItem_Click);
+            saveMenuItem->Click += gcnew EventHandler(this, &MyForm::SaveMenuItem_Click);
+            clearMenuItem->Click += gcnew EventHandler(this, &MyForm::ClearMenuItem_Click);
+            exportMenuItem->Click += gcnew EventHandler(this, &MyForm::ExportMenuItem_Click);
+            ImportMenuItem->Click += gcnew EventHandler(this, &MyForm::ImportMenuItem_Click);
+            ExportOutLineMenuItem->Click += gcnew EventHandler(this, &MyForm::ExportOutLineMenuItem_Click);
+            ToolsMenuItem->Click += gcnew EventHandler(this, &MyForm::ToolsMenuItem_Click);
+            SetupMenuItem->Click += gcnew EventHandler(this, &MyForm::SetupMenuItem_Click);
+            UndoMenuItem->Click += gcnew EventHandler(this, &MyForm::UndoMenuItem_Click);
+            RedoMenuItem->Click += gcnew EventHandler(this, &MyForm::RedoMenuItem_Click);
+            CopyMenuItem->Click += gcnew EventHandler(this, &MyForm::CopyMenuItem_Click);
+            PasteMenuItem->Click += gcnew EventHandler(this, &MyForm::PasteMenuItem_Click);
+            MulPasteMenuItem->Click += gcnew EventHandler(this, &MyForm::MulPasteMenuItem_Click);
+            CropMenuItem->Click += gcnew EventHandler(this, &MyForm::CropMenuItem_Click);
+            DeleteMenuItem->Click += gcnew EventHandler(this, &MyForm::DeleteMenuItem_Click);
+            fitToHeightMenuItem->Click += gcnew EventHandler(this, &MyForm::fitToHeightMenuItem_Click);
+            fitToWidthMenuItem->Click += gcnew EventHandler(this, &MyForm::fitToWidthMenuItem_Click);
+            AutoNestMenuItem->Click += gcnew EventHandler(this, &MyForm::AutoNestMenuItem_Click);
+            ReflectXMenuItem->Click += gcnew System::EventHandler(this, &MyForm::FlipHorizontal_Click);
+            ReflectYMenuItem->Click += gcnew System::EventHandler(this, &MyForm::FlipVertical_Click);
+            BringToFrontMenuItem->Click += gcnew System::EventHandler(this, &MyForm::BringToFrontMenuItem_Click);
+            SendToBackMenuItem->Click += gcnew System::EventHandler(this, &MyForm::SendToBackMenuItem_Click);
+
+            /*
+            GroupToolStripMenuItem->Click += gcnew EventHandler(this, &CanvasControl::GroupToolStripMenuItem_Click);
+            UngroupToolStripMenuItem->Click += gcnew EventHandler(this, &CanvasControl::UngroupToolStripMenuItem_Click);
+            PropertyToolStripMenuItem->Click += gcnew EventHandler(this, &CanvasControl::PropertyToolStripMenuItem_Click);
+            */
+
+            // Add menu items to the context menu strip
+            contextMenuStrip->Items->Add(newNestingMenuItem);
+            contextMenuStrip->Items->Add(OpenMenuItem);
+            contextMenuStrip->Items->Add(clearMenuItem);
+            contextMenuStrip->Items->Add(AutoNestMenuItem);
+            contextMenuStrip->Items->Add(ToolsMenuItem);
+            contextMenuStrip->Items->Add(SetupMenuItem);
+            contextMenuStrip->Items->Add(gcnew ToolStripSeparator());
+            contextMenuStrip->Items->Add(saveMenuItem);
+            contextMenuStrip->Items->Add(ImportMenuItem);
+            contextMenuStrip->Items->Add(exportMenuItem);
+            contextMenuStrip->Items->Add(ExportOutLineMenuItem);
+            contextMenuStrip->Items->Add(gcnew ToolStripSeparator());
+            contextMenuStrip->Items->Add(UndoMenuItem);
+            contextMenuStrip->Items->Add(RedoMenuItem);
+            contextMenuStrip->Items->Add(CopyMenuItem);
+            contextMenuStrip->Items->Add(PasteMenuItem);
+            contextMenuStrip->Items->Add(MulPasteMenuItem);
+            contextMenuStrip->Items->Add(CropMenuItem);
+            contextMenuStrip->Items->Add(DeleteMenuItem);
+            contextMenuStrip->Items->Add(GroupMenuItem);
+            contextMenuStrip->Items->Add(UngroupMenuItem);
+            contextMenuStrip->Items->Add(gcnew ToolStripSeparator());
+            contextMenuStrip->Items->Add(fitToWidthMenuItem);
+            contextMenuStrip->Items->Add(fitToHeightMenuItem);
+            contextMenuStrip->Items->Add(RotateMenuItem);
+            contextMenuStrip->Items->Add(ReflectItem);
+            contextMenuStrip->Items->Add(BringToFrontMenuItem);
+            contextMenuStrip->Items->Add(SendToBackMenuItem);
+            contextMenuStrip->Items->Add(gcnew ToolStripSeparator());
+            contextMenuStrip->Items->Add(PropertyMenuItem);
+
+            UngroupMenuItem->Enabled = false;
+            GroupMenuItem->Enabled = false;
+            PropertyMenuItem->Enabled = false;
+            SetupMenuItem->Enabled = false;
+            MulPasteMenuItem->Enabled = false;
+            CropMenuItem->Enabled = false;
+            OpenMenuItem->Enabled = false;
+            canvas->SetContextMenuStrip(contextMenuStrip);
+            canvasContainerPanel->ContextMenuStrip = contextMenuStrip;
+        }
+
+        void CopyImage() {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            for each (int selectedIndex in canvas->selectedImageIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[selectedIndex];
+                Image^ copiedImage = safe_cast<Image^>(imagePosition->Item1->Clone()); // Assuming Image has Clone method
+                Point position = imagePosition->Item2;
+                canvas->copiedImages->Add(Tuple::Create(copiedImage, position));
+            }
+        }
+
+        void PasteImage() {
+            if (canvas->copiedImages->Count == 0)
+            {
+                return;
+            }
+            Point mousePosition = this->PointToClient(Control::MousePosition);
+            Graphics^ graphics = this->CreateGraphics();
+            for each (Tuple<System::Drawing::Image^, System::Drawing::Point> ^ copiedImage in canvas->copiedImages)
+            {
+                System::Drawing::Image^ image = copiedImage->Item1;
+                System::Drawing::Point position = copiedImage->Item2;
+                Point pastePosition = Point(mousePosition.X - position.X, mousePosition.Y - position.Y);
+                graphics->DrawImage(image, pastePosition);
+                canvas->imagePositions->Add(Tuple::Create(image, pastePosition));
+            }
+            delete graphics;
+            canvas->Invalidate();
+        }
+
+        void FitToWidth() {
+            canvas->SetScale(1.0);
+            int formWidth = this->Width - 65;
+            float newScale = static_cast<float>(formWidth) / static_cast<float>(canvas->Width);
+            canvas->SetScale(newScale);
+            if (horizontalRuler != nullptr)
+            {
+                horizontalRuler->SetCanvasScale(newScale);
+                horizontalRuler->SetCanvasScale(newScale);
+                verticalRuler->SetCanvasScale(newScale);
+            }
+            else
+            {
+                MessageBox::Show("horizontalRuler is null. Unable to set scale.");
+            }
+        }
+
+        void FitToHeight() {
+            canvas->SetScale(1.0);
+            int formHeight = this->Height - 87;
+            float newScale = static_cast<float>(formHeight) / static_cast<float>(canvas->Height);
+            canvas->SetScale(newScale);
+            horizontalRuler->SetCanvasScale(newScale);
+            verticalRuler->SetCanvasScale(newScale);
+        }
+
+        void Form_KeyDown(Object^ sender, KeyEventArgs^ e) {
+            if (e->Control) {
+                if (e->KeyCode == Keys::Oemplus || e->KeyCode == Keys::PageUp || e->KeyCode == Keys::Add) {
+                    float newScale = canvas->GetScale() * 1.1f;
+                    canvas->SetScale(newScale);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                    e->Handled = true;
+                }
+
+                else if (e->KeyCode == Keys::OemMinus || e->KeyCode == Keys::PageDown || e->KeyCode == Keys::Subtract) {
+                    float newScale = canvas->GetScale() * 0.9f;
+                    canvas->SetScale(newScale);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                    e->Handled = true;
+                }
+
+                else if (e->Control && e->KeyCode == Keys::B)
+                {
+                    if ((ToolPanel->Visible)&&(ToolControlPanel->Visible))
+                    {
+                        ToolPanel->Visible = false;
+                        ToolControlPanel->Visible = false;
+                        ToolsMenuItem->Checked = false;
+                    }
+                    else {
+                        ToolPanel->Visible = true;
+                        ToolControlPanel->Visible = true;
+                        ToolsMenuItem->Checked = true;
+                    }
+                    e->Handled = true;
+                }
+
+                else if (e->Control && e->KeyCode == Keys::R)
+                {
+                    if ((horizontalRuler->Visible)&& (verticalRuler->Visible))
+                    {
+                        horizontalRuler->Visible = false;
+                        verticalRuler->Visible = false;
+                    }
+                    else {
+                        horizontalRuler->Visible = true;
+                        verticalRuler->Visible = true;
+                    }
+                    e->Handled = true;
+                }
+
+                else if (e->Control && e->KeyCode == Keys::N)
+                {
+                    newForm->ShowDialog();
+                }
+
+                else if (e->Control && e->KeyCode == Keys::C) {
+
+                    CopyImage();
+                }
+
+                else if (e->Control && e->KeyCode == Keys::V) {
+
+                    PasteImage();
+                }
+
+                else if (e->Control && e->KeyCode == Keys::W) {
+                    FitToWidth();
+                }
+
+                else if (e->Control && e->KeyCode == Keys::H) {
+                    FitToHeight();
+                }
+
+                else if (e->Control && e->KeyCode == Keys::S) {
+                    SaveMenuItem_Click(sender, e);
+                }
+
+                else if (e->Control && e->KeyCode == Keys::I) {
+                    ImportMenuItem_Click(sender, e);
+                }
+
+                else if (e->Control && e->KeyCode == Keys::E) {
+                    ExportMenuItem_Click(sender, e);
+                }
+            }
+        }
+
+        void ScrollPanel_Scroll(Object^ sender, ScrollEventArgs^ e) {
+            horizontalRuler->Left = -scrollPanel->HorizontalScroll->Value + 13;
+            verticalRuler->Top = -scrollPanel->VerticalScroll->Value + 13;
+        }
+
+        void scrollPanel_MouseWheel(Object^ sender, MouseEventArgs^ e) {
+            ScrollPanel_Scroll(sender, gcnew ScrollEventArgs(ScrollEventType::EndScroll, 0));
+        }
+
+        void NewNestingMenuItem_Click(Object^ sender, EventArgs^ e) {
+            try
+            {
+                newForm->ShowDialog();
+            }
+            catch (Exception^ ex)
+            {
+                MessageBox::Show(ex->Message);
+            }
+        }
+
+        void colorModeComboBox_SelectedIndexChanged(System::Object^ sender, System::EventArgs^ e)
+        {
+            if (colorModeComboBox->Text == "CMYK")
+            {
+                array<String^>^ folders = gcnew array<String^> {"D:\\BboxCMS\\CMS\\CMYK"};
+                UpdateICCComboBox(folders, iccComboBox);
+                iccComboBox->Text = "None";
+            }
+            if (colorModeComboBox->Text == "RGB")
+            {
+                array<String^>^ folders = gcnew array<String^> {"D:\\BboxCMS\\CMS\\RGB"};
+                UpdateICCComboBox(folders, iccComboBox);
+                iccComboBox->Text = "None";
+            }
+            if (colorModeComboBox->Text == "Gray")
+            {
+                array<String^>^ folders = gcnew array<String^> {"D:\\BboxCMS\\CMS\\Gray"};
+                UpdateICCComboBox(folders, iccComboBox);
+                iccComboBox->Text = "None";
+            }
+        }
+
+        void NewForm_MouseDown(Object^ sender, MouseEventArgs^ e) {
+            if (e->Button == System::Windows::Forms::MouseButtons::Left) {
+                offsetNewForm = Point(e->X, e->Y);
+                isDraggingNewForm = true;
+            }
+        }
+        
+        void NewForm_MouseMove(Object^ sender, MouseEventArgs^ e) {
+            if (isDraggingNewForm) {
+                Point newLocation = newForm->PointToScreen(Point(e->X, e->Y));
+                newLocation.Offset(-offsetNewForm.X, -offsetNewForm.Y);
+                newForm->Location = newLocation;
+            }
+        }
+
+        void NewForm_MouseUp(Object^ sender, MouseEventArgs^ e) {
+            if (e->Button == System::Windows::Forms::MouseButtons::Left) {
+                isDraggingNewForm = false;
+            }
+        }
+
+        void SearchForICCFiles(String^ folderPath, List<String^>^ fileList)
+        {
+            try
+            {
+                // Search for .icc and .icm files in the directory
+                array<String^>^ files = System::IO::Directory::GetFiles(folderPath, "*.icc");
+                fileList->AddRange(files);
+
+                array<String^>^ icmFiles = System::IO::Directory::GetFiles(folderPath, "*.icm");
+                fileList->AddRange(icmFiles);
+
+
+                // Recursively search subdirectories
+                array<String^>^ subDirectories = System::IO::Directory::GetDirectories(folderPath);
+                for each (String ^ subDirectory in subDirectories)
+                {
+                    SearchForICCFiles(subDirectory, fileList);
+                }
+            }
+            catch (Exception^ ex)
+            {
+                // Handle exceptions if necessary
+                Console::WriteLine("Error: " + ex->Message);
+            }
+        }
+        
+        void UpdateICCComboBox(array<String^>^ folderPaths, ComboBox^ iccComboBox)
+        {
+            iccComboBox->Items->Clear();
+            iccComboBox->Items->Add("None");
+            
+            for each (String ^ folderPath in folderPaths)
+            {
+                List<String^>^ fileList = gcnew List<String^>();
+                SearchForICCFiles(folderPath, fileList);
+
+                for each (String ^ fileName in fileList)
+                {
+                    String^ fileNameWithoutPath = System::IO::Path::GetFileName(fileName);
+                    iccComboBox->Items->Add(fileNameWithoutPath);
+                }
+            }
+        }
+      
+        void OnFileSystemChange(Object^ sender, System::IO::FileSystemEventArgs^ e)
+        {
+            // Check if the changed file has an .icc or .icm extension
+            if (System::IO::Path::GetExtension(e->FullPath)->Equals(".icc", StringComparison::InvariantCultureIgnoreCase) ||
+                System::IO::Path::GetExtension(e->FullPath)->Equals(".icm", StringComparison::InvariantCultureIgnoreCase))
+            {
+                array<String^>^ folders = gcnew array<String^> { "D:\\BboxCMS\\CMS\\RGB", "D:\\BboxCMS\\CMS\\CMYK", "D:\\BboxCMS\\CMS\\Gray" };
+                UpdateICCComboBox(folders, iccComboBox);
+            }
+        }
+
+        void OnFileSystemRenamed(Object^ sender, System::IO::RenamedEventArgs^ e)
+        {
+            // Check if the renamed file has an .icc or .icm extension
+            if (System::IO::Path::GetExtension(e->FullPath)->Equals(".icc", StringComparison::InvariantCultureIgnoreCase) ||
+                System::IO::Path::GetExtension(e->FullPath)->Equals(".icm", StringComparison::InvariantCultureIgnoreCase))
+            {
+                // Update the ICC combo box with the latest files
+                array<String^>^ folders = gcnew array<String^> { "D:\\BboxCMS\\CMS\\RGB", "D:\\BboxCMS\\CMS\\CMYK", "D:\\BboxCMS\\CMS\\Gray" };
+                UpdateICCComboBox(folders, iccComboBox);
+            }
+        }
+
+        int CountFolders(String^ folderPath)
+        {
+            try
+            {
+                // Get an array of all subdirectories in the specified path.
+                array<String^>^ directories = System::IO::Directory::GetDirectories(folderPath);
+
+                // Return the number of folders.
+                return directories->Length;
+            }
+            catch (Exception^ ex)
+            {
+                // Handle any exceptions, such as if the folder doesn't exist or access is denied.
+                Console::WriteLine("Error: " + ex->Message);
+                return -1; // Return -1 to indicate an error.
+            }
+        }
+
+        void NewForm_Shown(Object^ sender, EventArgs^ e)
+        {
+            nestPageWidthTxt->Focus();
+        }
+
+        void CreateBtn_Click(Object^ sender, EventArgs^ e)
+        {
+            try
+            {
+                canvas->Width = Convert::ToInt32(nestPageWidthTxt->Text)* 3.779528;
+                canvas->Height = Convert::ToInt32(nestPageHeightTxt->Text) * 3.779528;
+                canvas->canvasWidthInMillimeters = Convert::ToInt32(nestPageWidthTxt->Text) * 3.779528;
+                canvas->canvasHeightInMillimeters = Convert::ToInt32(nestPageHeightTxt->Text) * 3.779528;
+                if (canvas->canvasWidthInMillimeters >= canvas->canvasHeightInMillimeters)
+                {
+                    int formWidth = this->Width - 65;
+                    newScale = static_cast<float>(formWidth) / static_cast<float>(canvas->Width);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                }
+                else
+                {
+                    int formHeight = this->Height - 87;
+                    newScale = static_cast<float>(formHeight) / static_cast<float>(canvas->Height);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                }
+                CanvasWidthTxtbox->Text = Convert::ToInt32(nestPageWidthTxt->Text).ToString("0.0");
+                CanvasHeightTxtbox->Text = Convert::ToInt32(nestPageHeightTxt->Text).ToString("0.0");
+                // Invalidate the control to force it to repaint
+                String^ folderName = nameTxtbox->Text->Trim();
+                if (!String::IsNullOrEmpty(folderName))
+                {
+                    String^ folderPath = "D:\\BboxCMS\\Nesting"; // Change this to your folder path
+                    String^ newFolderPath = System::IO::Path::Combine(folderPath, folderName);
+                    System::IO::Directory::CreateDirectory(newFolderPath);
+                    Console::WriteLine("New folder created: " + newFolderPath);
+                    canvas->canvasSaveLocation = newFolderPath;
+                }
+
+                canvas->Invalidate();
+                canvas->Update();
+                canvas->SetScale(newScale);
+                newForm->Close();
+            }
+            catch (Exception^ ex)
+            {
+                // Handle exceptions if necessary
+            }
+
+        }
+
+        void CancelBtn_Click(Object^ sender, EventArgs^ e)
+        {
+            newForm->Close();
+        }
+
+        void OpenMenuItem_Click(Object^ sender, EventArgs^ e) {
+            // Implement action for "New Nesting" menu item
+        }
+
+        void SaveMenuItem_Click(Object^ sender, EventArgs^ e) {
+           
+            XmlDocument^ xmlDoc = gcnew XmlDocument();
+            XmlElement^ root = xmlDoc->CreateElement("Images");
+            xmlDoc->AppendChild(root);
+            for each (Tuple<Image^, Point> ^ imagePosition in canvas->imagePositions)
+            {
+                Image^ image = imagePosition->Item1;
+                Point position = imagePosition->Item2;
+                XmlElement^ imageElement = xmlDoc->CreateElement("Image");
+                root->AppendChild(imageElement);
+                String^ imageName = (image->Tag != nullptr) ? image->Tag->ToString() : "Unknown";
+                imageElement->SetAttribute("Name", imageName); // Modify this to get the actual image name
+                imageElement->SetAttribute("Width", image->Width.ToString());
+                imageElement->SetAttribute("Height", image->Height.ToString());
+                imageElement->SetAttribute("X", position.X.ToString());
+                imageElement->SetAttribute("Y", position.Y.ToString());
+            }
+            String^ fileName = canvas->canvasSaveLocation + ".bbn"; // Specify the file name here
+            xmlDoc->Save(fileName);
+            MessageBox::Show("Images saved to " + fileName, "Save Successful", MessageBoxButtons::OK, MessageBoxIcon::Information);
+        }
+
+        void ToolsMenuItem_Click(Object^ sender, EventArgs^ e){
+            try
+            {
+                    if (ToolsMenuItem->Checked)
+                    {
+                        ToolPanel->Visible = true;
+                        ToolControlPanel->Visible = true;
+                    }
+                    else
+                    {
+                        ToolPanel->Visible = false;
+                        ToolControlPanel->Visible = false;
+                    }
+            }
+            catch (Exception^ ex)
+            {
+                MessageBox::Show(ex->Message);
+            }
+        }
+
+        void RadioButton_Paint(System::Object^ sender, System::Windows::Forms::PaintEventArgs^ e)
+        {
+            RadioButton^ radioButton = dynamic_cast<RadioButton^>(sender);
+            System::Drawing::Rectangle outerCircleRect = System::Drawing::Rectangle(1, (radioButton->Height - 10) / 2, 10, 10);
+            e->Graphics->DrawEllipse(System::Drawing::Pens::White, outerCircleRect);
+            System::Drawing::Rectangle innerCircleRect = System::Drawing::Rectangle(3, (radioButton->Height - 10) / 2 + 2, 6, 6);
+            if (radioButton->Checked)
+            {
+                e->Graphics->FillEllipse(System::Drawing::Brushes::Red, innerCircleRect);
+            }
+            else
+            {
+                e->Graphics->FillEllipse(System::Drawing::Brushes::White, innerCircleRect);
+            }
+        }
+
+        void AlignL_Click(System::Object^ sender, System::EventArgs^ e)
+        {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+
+            for each (int index in canvas->selectedImageIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                Image^ image = imagePosition->Item1;
+                Point position(0, 0);
+                canvas->imagePositions[index] = Tuple::Create(image, position);
+            }
+
+            canvas->Invalidate();
+        }
+
+        void AlignC_Click(System::Object^ sender, System::EventArgs^ e)
+        {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            float canvasWidth = canvas->Width;
+            float canvasHeight = canvas->Height;
+            for each (int index in canvas->selectedImageIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                Image^ image = imagePosition->Item1;
+                float imageWidth = image->Width;
+                float imageHeight = image->Height;
+                float scaledImageWidth = (float)(imageWidth * canvas->GetScale());
+                float scaledImageHeight = (float)(imageHeight * canvas->GetScale());
+                float centerX = ((canvasWidth - scaledImageWidth) / 2);
+                int y = 0;
+                Point position(centerX, y);
+                canvas->imagePositions[index] = Tuple::Create(image, position);
+            }
+
+            canvas->Invalidate();
+        }
+
+        void AlignR_Click(System::Object^ sender, System::EventArgs^ e)
+        {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            float canvasWidth = canvas->Width;
+            float canvasHeight = canvas->Height;
+            for each (int index in canvas->selectedImageIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                Image^ image = imagePosition->Item1;
+
+                // Get the width and height of the image
+                float imageWidth = image->Width;
+                float imageHeight = image->Height;
+
+                // Calculate the scaled image width and height
+                float scaledImageWidth = (float)(imageWidth * canvas->GetScale());
+                float scaledImageHeight = (float)(imageHeight * canvas->GetScale());
+
+                // Calculate the x-coordinate for right alignment considering scale
+                float x = (canvasWidth - scaledImageWidth);
+                // Ensure the x-coordinate doesn't go beyond the canvas width
+                x = max(0, x);
+                // Set the y-coordinate to 0 for top alignment
+                int y = 0;
+
+                // Ensure the entire width of the image fits within the canvas
+                if (scaledImageWidth > canvasWidth) {
+                    scaledImageWidth = canvasWidth;
+                }
+
+                // Set the position to top right
+                Point position(x, y);
+                canvas->imagePositions[index] = Tuple::Create(image, position);
+            }
+
+            canvas->Invalidate();
+        }
+
+        void AlignM_Click(System::Object^ sender, System::EventArgs^ e) {
+            try
+            {
+                if (canvas->selectedImageIndices->Count == 0)
+                {
+                    return;
+                }
+
+                // Get the width and height of the canvas
+                int canvasWidth = canvas->Width;
+                int canvasHeight = canvas->Height;
+
+                for each (int index in canvas->selectedImageIndices)
+                {
+                    Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                    Image^ image = imagePosition->Item1;
+
+                    // Get the width and height of the image
+                    int imageWidth = image->Width;
+                    int imageHeight = image->Height;
+
+                    // Calculate the scaled image width and height
+                    int scaledImageWidth = (int)(imageWidth * canvas->GetScale());
+                    int scaledImageHeight = (int)(imageHeight * canvas->GetScale());
+
+                    // Calculate the x-coordinate for center alignment considering scale
+                    int x = (canvasWidth - scaledImageWidth) / 2;
+                    // Calculate the y-coordinate for center alignment considering scale
+                    int y = (canvasHeight - scaledImageHeight) / 2;
+
+                    // Set the position to the middle of the canvas
+                    Point position(x, y);
+                    canvas->imagePositions[index] = Tuple::Create(image, position);
+                }
+
+                canvas->Invalidate();
+            }
+            catch (Exception^ ex)
+            {
+                MessageBox::Show(ex->Message);
+            }
+        }
+
+        void AlignCtr_Click(System::Object^ sender, System::EventArgs^ e) {
+            
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            int canvasWidth = canvas->Width;
+            int canvasHeight = canvas->Height;
+            for each (int index in canvas->selectedImageIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                Image^ image = imagePosition->Item1;
+                int imageWidth = image->Width;
+                int imageHeight = image->Height;
+                int scaledImageWidth = (int)(imageWidth * canvas->GetScale());
+                int scaledImageHeight = (int)(imageHeight * canvas->GetScale());
+                int x = (canvasWidth - scaledImageWidth) / 2;
+                int y = (canvasHeight - scaledImageHeight) / 2;
+                Point position(x, y);
+                canvas->imagePositions[index] = Tuple::Create(image, position);
+            }
+            canvas->Invalidate();
+        }
+
+        void AlignB_Click(System::Object^ sender, System::EventArgs^ e) {
+           
+        }
+
+        void CanvasWidthTxtbox_KeyDown(Object^ sender, KeyEventArgs^ e)
+        {
+            if (e->KeyCode == Keys::Enter)
+            {
+                canvas->Width = Convert::ToInt32(CanvasWidthTxtbox->Text) * 3.779528;
+                canvas->Height = Convert::ToInt32(CanvasHeightTxtbox->Text) * 3.779528;
+                canvas->canvasWidthInMillimeters = Convert::ToInt32(CanvasWidthTxtbox->Text) * 3.779528;
+                canvas->canvasHeightInMillimeters = Convert::ToInt32(CanvasHeightTxtbox->Text) * 3.779528;
+                if (canvas->canvasWidthInMillimeters >= canvas->canvasHeightInMillimeters)
+                {
+                    int formWidth = this->Width - 65;
+                    newScale = static_cast<float>(formWidth) / static_cast<float>(canvas->Width);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                   // canvasContainerPanel->Size = System::Drawing::Size(this->Width + 10, this->Height + 10);
+                }
+                else
+                {
+                    int formHeight = this->Height - 87;
+                    newScale = static_cast<float>(formHeight) / static_cast<float>(canvas->Height);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                  //  canvasContainerPanel->Size = System::Drawing::Size(this->Width + 10, this->Height + 10);
+                }
+                canvas->Invalidate();
+                canvas->Update();
+                canvas->SetScale(newScale);
+            }
+        }
+
+        void CanvasHeightTxtbox_KeyDown(Object^ sender, KeyEventArgs^ e)
+        {
+            if (e->KeyCode == Keys::Enter)
+            {
+                canvas->Width = Convert::ToInt32(CanvasWidthTxtbox->Text) * 3.779528;
+                canvas->Height = Convert::ToInt32(CanvasHeightTxtbox->Text) * 3.779528;
+                canvas->canvasWidthInMillimeters = Convert::ToInt32(CanvasWidthTxtbox->Text) * 3.779528;
+                canvas->canvasHeightInMillimeters = Convert::ToInt32(CanvasHeightTxtbox->Text) * 3.779528;
+                if (canvas->canvasWidthInMillimeters >= canvas->canvasHeightInMillimeters)
+                {
+                    int formWidth = 1366 - 65;
+                    newScale = static_cast<float>(formWidth) / static_cast<float>(canvas->Width);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                   // canvasContainerPanel->Size = System::Drawing::Size(this->Width + 10, this->Height + 10);
+                }
+                else
+                {
+                    int formHeight = 765 - 87;
+                    newScale = static_cast<float>(formHeight) / static_cast<float>(canvas->Height);
+                    horizontalRuler->SetCanvasScale(newScale);
+                    verticalRuler->SetCanvasScale(newScale);
+                   // canvasContainerPanel->Size = System::Drawing::Size(this->Width + 10, this->Height + 10);
+                }
+                canvas->Invalidate();
+                canvas->Update();
+                canvas->SetScale(newScale);
+            }
+        }
+
+        void ObjXAxisTxtbox_KeyDown(Object^ sender, KeyEventArgs^ e) {
+            if (e->KeyCode == Keys::Enter)
+            {
+                for each (int index in canvas->selectedImageIndices)
+                {
+                    if (XYTL->Checked == true) {
+                        Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                        Image^ image = imagePosition->Item1;
+                        int x = (System::Int32::Parse(ObjXAxisTxtbox->Text)* 3.779528) * canvas->GetScale();
+                        int y = (System::Int32::Parse(ObjYAxisTxtbox->Text) * 3.779528) * canvas->GetScale();
+                        Point position(x, y);
+                        canvas->imagePositions[index] = Tuple::Create(image, position);
+                    }
+                }
+            }
+            canvas->Invalidate();
+        }
+
+        void ObjYAxisTxtbox_KeyDown(Object^ sender, KeyEventArgs^ e) {
+            if (e->KeyCode == Keys::Enter)
+            {
+                for each (int index in canvas->selectedImageIndices)
+                {
+                    if (XYTL->Checked == true) {
+                        Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                        Image^ image = imagePosition->Item1;
+                        int x = (System::Int32::Parse(ObjXAxisTxtbox->Text) * 3.779528) * canvas->GetScale();
+                        int y = (System::Int32::Parse(ObjYAxisTxtbox->Text) * 3.779528) * canvas->GetScale();
+                        Point position(x, y);
+                        canvas->imagePositions[index] = Tuple::Create(image, position);
+                    }
+                }
+            }
+            canvas->Invalidate();
+        }
+
+        void ToolPanel_MouseDown(Object^ sender, MouseEventArgs^ e) {
+            offsetX = e->X;
+            offsetY = e->Y;
+            isDragging = true;
+        }
+
+        void ToolPanel_MouseMove(Object^ sender, MouseEventArgs^ e) {
+            if (isDragging) {
+                ToolPanel->Location = Point(e->X + ToolPanel->Left - offsetX, e->Y + ToolPanel->Top - offsetY);
+            }
+        }
+
+        void ToolPanel_MouseUp(Object^ sender, MouseEventArgs^ e) {
+            isDragging = false;
+        }
+
+        void ToolControlPanel_MouseDown(Object^ sender, MouseEventArgs^ e) {
+            offsetX = e->X;
+            offsetY = e->Y;
+            isDragging = true;
+        }
+
+        void ToolControlPanel_MouseMove(Object^ sender, MouseEventArgs^ e) {
+            if (isDragging) {
+                ToolControlPanel->Location = Point(e->X + ToolControlPanel->Left - offsetX, e->Y + ToolControlPanel->Top - offsetY);
+            }
+        }
+
+        void ToolControlPanel_MouseUp(Object^ sender, MouseEventArgs^ e) {
+            isDragging = false;
+        }
+
+        void SetupMenuItem_Click(Object^ sender, EventArgs^ e) {
+
+        }
+
+        void ClearMenuItem_Click(Object^ sender, EventArgs^ e) {
+            try
+            {
+                
+                    canvas->imagePositions->Clear();
+                    canvas->selectedImageIndices->Clear();
+                    canvas->Width = 0;
+                    canvas->Height = 0;
+                    canvas->Invalidate();
+              
+            }
+            catch (Exception^ ex)
+            {
+                // Handle exceptions if necessary
+            }
+        }
+
+        void ExportMenuItem_Click(Object^ sender, EventArgs^ e) {
+            SaveFileDialog^ saveFileDialog1 = gcnew SaveFileDialog();
+            saveFileDialog1->Filter = "Postscript files (*.ps)|*.ps|All files (*.*)|*.*";
+            saveFileDialog1->FilterIndex = 1;
+            saveFileDialog1->RestoreDirectory = true;
+            if (saveFileDialog1->ShowDialog() == System::Windows::Forms::DialogResult::OK)
+            {
+                this->ExportToPdf(saveFileDialog1->FileName);
+            }
+        }
+
+        void ExportToPdf(String^ filePath)
+        {
+            PdfSharp::Pdf::PdfDocument^ document = gcnew PdfSharp::Pdf::PdfDocument();
+            PdfSharp::Pdf::PdfPage^ page = document->AddPage();
+            page->Width = (canvas->canvasWidthInMillimeters) * 0.75; // Width in points
+            page->Height = (canvas->canvasHeightInMillimeters) * 0.75; // Height in points
+            PdfSharp::Drawing::XGraphics^ gfx = PdfSharp::Drawing::XGraphics::FromPdfPage(page);
+            for each (Tuple<Image^, Point> ^ imagePosition in canvas->imagePositions)
+            {
+                Image^ image = imagePosition->Item1;
+                Point position = imagePosition->Item2;
+                canvas->Filepath = image->Tag->ToString();
+                FindXMLFile(canvas->Filepath);
+                int widthPoints = static_cast<int>(OrginalWidth);
+                int heightPoints = static_cast<int>(OrginalHeight);
+                System::IO::MemoryStream^ ms = gcnew System::IO::MemoryStream();
+                image->Save(ms, System::Drawing::Imaging::ImageFormat::Bmp);
+                PdfSharp::Drawing::XImage^ ximage = PdfSharp::Drawing::XImage::FromStream(ms);
+                gfx->DrawImage(ximage, position.X, position.Y, widthPoints, heightPoints);
+                ms->Close();
+            }
+
+            // Save the document as a PostScript file
+            String^ psFilePath = "D:\\output.ps";
+            document->Save(psFilePath);
+            delete document;
+
+
+        }
+
+        void FindXMLFile(String^ path) {
+            try {
+                String^ directoryPath = System::IO::Path::GetDirectoryName(path);
+                System::IO::DirectoryInfo^ directory = gcnew System::IO::DirectoryInfo(directoryPath);
+                array<System::IO::DirectoryInfo^>^ subDirectories = directory->GetDirectories("XML", System::IO::SearchOption::AllDirectories);
+                if (subDirectories->Length > 0) {
+                    System::IO::DirectoryInfo^ xmlFolder = subDirectories[0];
+                    String^ fileName = System::IO::Path::GetFileNameWithoutExtension(path);
+                    array<System::IO::FileInfo^>^ xmlFiles = xmlFolder->GetFiles(fileName + ".xml", System::IO::SearchOption::TopDirectoryOnly);
+                    if (xmlFiles->Length > 0) {
+                        XmlDocument^ xmlDoc = gcnew XmlDocument();
+                        xmlDoc->Load(xmlFiles[0]->FullName);
+                        XmlNode^ widthNode = xmlDoc->SelectSingleNode("//width");
+                        XmlNode^ heightNode = xmlDoc->SelectSingleNode("//height");
+                        XmlNode^ ImagePathNode = xmlDoc->SelectSingleNode("//ImagePath");
+                        if (widthNode != nullptr && heightNode != nullptr) {
+                            // Assign values to variables
+                            OrginalWidth = Single::Parse(widthNode->InnerText) * 3.779528;
+                            OrginalHeight = Single::Parse(heightNode->InnerText) * 3.779528;
+                        }
+                        else {
+                            Console::WriteLine("Width or height not found in XML.");
+                        }
+                    }
+                    else {
+                        Console::WriteLine("XML file not found.");
+                    }
+                }
+                else {
+                    Console::WriteLine("XML folder not found.");
+                }
+            }
+            catch (Exception^ e) {
+                Console::WriteLine("An error occurred: " + e->Message);
+            }
+        }
+
+        void ImportMenuItem_Click(Object^ sender, EventArgs^ e) {
+            try
+            {
+                if ((canvas->Height != 0) && (canvas->Width != 0))
+                {
+                    OpenFileDialog^ openFileDialog1 = gcnew OpenFileDialog();
+                    openFileDialog1->Filter = "Blackbox Image |*.bbi;";
+                    openFileDialog1->Title = "Select an Image File";
+                    openFileDialog1->Multiselect = true; // Allow only single selection
+                    if (openFileDialog1->ShowDialog() == System::Windows::Forms::DialogResult::OK)
+                    {
+                        for each (String ^ imagePath in openFileDialog1->FileNames)
+                        {
+                            Image^ image = Image::FromFile(imagePath);
+                            AddImage(image, imagePath);
+                        }
+                    }
+                }
+                else
+                {
+                    MessageBox::Show("Please create new Nesting");
+                }
+            }
+            catch (Exception^ ex)
+            {
+                MessageBox::Show("Error: " + ex->Message, "Error", MessageBoxButtons::OK, MessageBoxIcon::Error);
+            }
+        }
+
+        void ExportOutLineMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            try
+            {
+                SaveFileDialog^ saveFileDialog1 = gcnew SaveFileDialog();
+                saveFileDialog1->Filter = "PDF files (*.pdf)|*.pdf|All files (*.*)|*.*";
+                saveFileDialog1->FilterIndex = 1;
+                saveFileDialog1->RestoreDirectory = true;
+                if (saveFileDialog1->ShowDialog() == System::Windows::Forms::DialogResult::OK)
+                {
+                    String^ fileName = saveFileDialog1->FileName;
+                    PdfDocument^ document = gcnew PdfDocument();
+                    PdfPage^ page = document->AddPage();
+                    page->Width = (canvas->canvasWidthInMillimeters) * 0.75; // Width in points
+                    page->Height = (canvas->canvasHeightInMillimeters) * 0.75; // Height in points
+                    XGraphics^ gfx = XGraphics::FromPdfPage(page);
+                    XColor^ penColor = XColor::FromArgb(0, 0, 0); // Black
+                    XPen^ pen = gcnew XPen(*penColor, 0.5f); // 0.5f is the width
+                    for each (Tuple<Image^, Point> ^ imagePosition in canvas->imagePositions)
+                    {
+                        Image^ image = imagePosition->Item1;
+                        Point position = imagePosition->Item2;
+                        canvas->Filepath = image->Tag->ToString();
+                        FindXMLFile(canvas->Filepath);
+                        int scaledWidth = static_cast<int>(OrginalWidth);
+                        int scaledHeight = static_cast<int>(OrginalHeight);
+                        gfx->DrawRectangle(pen, position.X, position.Y, scaledWidth, scaledHeight);
+                    }
+                    document->Save(fileName);
+                    document->Close();
+                    MessageBox::Show("Outline exported to " + fileName, "Export Complete", MessageBoxButtons::OK, MessageBoxIcon::Information);
+                }
+            }
+            catch (Exception^ ex)
+            {
+                // Handle exceptions if necessary
+                MessageBox::Show("Error exporting outline: " + ex->Message, "Error", MessageBoxButtons::OK, MessageBoxIcon::Error);
+            }
+        }
+
+        void UndoMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            if (canvas->undoActionHistory->Count > 0)
+            {
+                ImageAction^ action = canvas->undoActionHistory[canvas->undoActionHistory->Count - 1];
+                if (action->added)
+                {
+                    canvas->imagePositions->RemoveAt(action->index);
+                }
+                else
+                {
+                    Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[action->index];
+                    canvas->imagePositions[action->index] = Tuple::Create(imagePosition->Item1, action->originalPosition);
+                }
+                canvas->redoActionHistory->Add(action);
+                canvas->undoActionHistory->RemoveAt(canvas->undoActionHistory->Count - 1);
+                canvas->Invalidate();
+            }
+        }
+
+        void RedoMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            if (canvas->redoActionHistory->Count > 0)
+            {
+                ImageAction^ action = canvas->redoActionHistory[canvas->redoActionHistory->Count - 1];
+                if (action->added)
+                {
+                    canvas->imagePositions->Add(gcnew Tuple<Image^, Point>(nullptr, action->originalPosition)); // Assuming image is nullptr
+                }
+                else
+                {
+                    Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[action->index];
+                    canvas->imagePositions[action->index] = gcnew Tuple<Image^, Point>(imagePosition->Item1, action->newPosition);
+                }
+                canvas->undoActionHistory->Add(action);
+                canvas->redoActionHistory->RemoveAt(canvas->redoActionHistory->Count - 1);
+                canvas->Invalidate();
+            }
+        }
+
+        void CopyMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            CopyImage();
+        }
+
+        void PasteMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            PasteImage();
+        }
+
+        void MulPasteMenuItem_Click(Object^ sender, EventArgs^ e) {
+
+        }
+
+        void CropMenuItem_Click(Object^ sender, EventArgs^ e) {
+
+        }
+
+        void DeleteMenuItem_Click(Object^ sender, EventArgs^ e) {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            List<int>^ indicesToDelete = gcnew List<int>();
+            indicesToDelete->AddRange(canvas->selectedImageIndices);
+            indicesToDelete->Sort();
+            indicesToDelete->Reverse();
+            for each (int index in indicesToDelete)
+            {
+                canvas->imagePositions->RemoveAt(index);
+            }
+            canvas->selectedImageIndices->Clear();
+            canvas->Invalidate();
+        }
+
+        void fitToHeightMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            FitToWidth();
+        }
+
+        void fitToWidthMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            FitToHeight();
+        }
+
+        ref class ImageSizeComparer : public System::Collections::Generic::IComparer<Image^>
+        {
+        public:
+            virtual int Compare(Image^ x, Image^ y)
+            {
+                // Compare images based on their area (width * height)
+                int areaX = x->Width * x->Height;
+                int areaY = y->Width * y->Height;
+
+                // Sort in descending order (larger area comes first)
+                return areaY.CompareTo(areaX);
+            }
+        };
+
+        void AutoNestMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            ImageSizeComparer^ comparer = gcnew ImageSizeComparer();
+            canvas->images->Sort(comparer);
+            canvas->imagePositions->Clear();
+            float currentX = 0.0f;
+            float currentY = 0.0f;
+            int maxHeightInRow = 0; // Track the maximum height in the current row
+            for each (Image ^ image in canvas->images)
+            {
+                String^ filePath = image->Tag->ToString(); // Assuming the file path is stored in the tag
+                canvas->Filepath = filePath;
+                FindXMLFile(canvas->Filepath);
+                int scaledWidth = static_cast<int>(OrginalWidth * canvas->GetScale());
+                int scaledHeight = static_cast<int>(OrginalHeight * canvas->GetScale());
+
+                if (currentX + scaledWidth > canvas->Width)
+                {
+                    currentX = 0;
+                    currentY += maxHeightInRow; // Start a new row at the maximum height of the current row
+                    maxHeightInRow = 0; // Reset the maximum height for the new row
+                }
+                if (currentY + scaledHeight > canvas->Height)
+                {
+                    break;
+                }
+                // Update the maximum height in the current row
+                if (scaledHeight > maxHeightInRow)
+                {
+                    maxHeightInRow = scaledHeight;
+                }
+
+                Point point(static_cast<int>(currentX), static_cast<int>(currentY));
+                canvas->imagePositions->Add(gcnew Tuple<Image^, Point>(image, point));
+                currentX += scaledWidth;
+
+                int freeSpaceWidth = canvas->Width - currentX;
+                int freeSpaceHeight = canvas->Height - (currentY + scaledHeight);
+                canvas->freeSpace->Add(gcnew Tuple<float, float>(freeSpaceWidth, freeSpaceHeight));
+            }
+            canvas->Invalidate();
+        }
+
+        void FlipHorizontal_Click(Object^ sender, EventArgs^ e)
+        {
+            FlipSelectedImage(RotateFlipType::RotateNoneFlipX);
+        }
+
+        void FlipVertical_Click(Object^ sender, EventArgs^ e)
+        {
+            FlipSelectedImage(RotateFlipType::RotateNoneFlipY);
+        }
+
+        void FlipSelectedImage(RotateFlipType rotateFlipType)
+        {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            for each (int index in canvas->selectedImageIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[index];
+                Image^ image = imagePosition->Item1;
+                Point position = imagePosition->Item2;
+                image->RotateFlip(rotateFlipType);
+                canvas->imagePositions[index] = Tuple::Create(image, position);
+            }
+            canvas->Invalidate();
+        }
+
+        void SendToBackMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            List<int>^ selectedIndices = gcnew List<int>(canvas->selectedImageIndices);
+            for each (int selectedIndex in selectedIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[selectedIndex];
+                canvas->imagePositions->RemoveAt(selectedIndex);
+                canvas->imagePositions->Insert(0, imagePosition);
+                canvas->selectedImageIndices[selectedIndices->IndexOf(selectedIndex)] = 0;
+            }
+            canvas->Invalidate();
+        }
+
+        void BringToFrontMenuItem_Click(Object^ sender, EventArgs^ e)
+        {
+            if (canvas->selectedImageIndices->Count == 0)
+            {
+                return;
+            }
+            List<int>^ selectedIndices = gcnew List<int>(canvas->selectedImageIndices);
+            for each (int selectedIndex in selectedIndices)
+            {
+                Tuple<Image^, Point>^ imagePosition = canvas->imagePositions[selectedIndex];
+                canvas->imagePositions->RemoveAt(selectedIndex);
+                canvas->imagePositions->Add(imagePosition);
+                canvas->selectedImageIndices[selectedIndices->IndexOf(selectedIndex)] = canvas->imagePositions->Count - 1;
+            }
+            canvas->Invalidate();
+        }
+
+        void AddImage(Image^ image, String^ path)
+        {
+            canvas->Filepath = path;
+            canvas->images->Add(image); // Add the image to the list of images
+            image->Tag = path;
+            Point nextPosition = GetNextAvailablePosition(canvas);
+            canvas->imagePositions->Add(gcnew Tuple<Image^, Point>(image, nextPosition)); // Add the image position to the list
+            canvas->Invalidate(); // Invalidate the canvas to trigger a redraw
+        }
+
+        Point GetNextAvailablePosition(CanvasControl^ canvas)
+        {
+                nextPosition.Y = padding;
+                nextPosition.X = padding;
+                padding += 10;
+            return nextPosition;
+        }
+    private:
+        Panel^ scrollPanel;
+        CanvasControl^ canvas;
+        HorizontalRulerControl^ horizontalRuler;
+        VerticalRulerControl^ verticalRuler;
+        Panel^ canvasContainerPanel;
+        System::Windows::Forms::ContextMenuStrip^ contextMenuStrip;
+        TextBox^ nestPageWidthTxt = gcnew TextBox();
+        TextBox^ nestPageHeightTxt = gcnew TextBox();
+        TextBox^ ObjHeightTxtbox = gcnew TextBox();
+        TextBox^ ObjWidthTxtbox = gcnew TextBox();
+        TextBox^ ObjYAxisTxtbox = gcnew TextBox();
+        TextBox^ ObjXAxisTxtbox = gcnew TextBox();
+        TextBox^ nameTxtbox = gcnew TextBox();
+        ComboBox^ iccComboBox = gcnew ComboBox();
+        float newScale;
+        float OrginalWidth;
+        float OrginalHeight;
+        ComboBox^ colorModeComboBox = gcnew ComboBox();
+        TextBox^ CanvasHeightTxtbox = gcnew TextBox();
+        TextBox^ CanvasWidthTxtbox = gcnew TextBox();
+        RadioButton^ XYTL = gcnew RadioButton();
+        ToolStripMenuItem^ ToolsMenuItem = gcnew ToolStripMenuItem("Tools");
+        System::Windows::Forms::Form^ newForm = gcnew System::Windows::Forms::Form();
+        System::Windows::Forms::Panel^ ToolPanel = gcnew System::Windows::Forms::Panel();
+        System::Windows::Forms::Panel^ ToolControlPanel = gcnew System::Windows::Forms::Panel();
+        bool isDragging = false;
+        Point offset;
+        bool isDraggingNewForm = false;
+        Point offsetNewForm;
+        Point nextPosition = Point(0, 0);
+        int offsetX = 0;
+        int offsetY = 0;
+        
+        int padding = 0; // Padding between images
+        private:
+            int previousWidth;
+            int previousHeight;
+        System::ComponentModel::ComponentResourceManager^ resources = (gcnew System::ComponentModel::ComponentResourceManager(LinearChart::typeid));
+    };
+
+}
